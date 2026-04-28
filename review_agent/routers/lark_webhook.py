@@ -62,9 +62,13 @@ def make_router(storage: Storage, queue: TaskQueue, *, encrypt_key: str, verific
         content_raw = msg.get("content", "")
 
         content_text = ""
+        file_key = ""
         try:
+            parsed = json.loads(content_raw)
             if msg_type == "text":
-                content_text = json.loads(content_raw).get("text", "")
+                content_text = parsed.get("text", "")
+            elif msg_type in ("file", "image", "audio"):
+                file_key = parsed.get("image_key", parsed.get("file_key", ""))
         except json.JSONDecodeError:
             content_text = content_raw
 
@@ -85,6 +89,7 @@ def make_router(storage: Storage, queue: TaskQueue, *, encrypt_key: str, verific
             chat_id=msg.get("chat_id", ""),
             create_time=msg.get("create_time", ""),
             message_id=msg.get("message_id", ""),
+            file_key=file_key,
         )
         await queue.enqueue(
             "incoming_message",

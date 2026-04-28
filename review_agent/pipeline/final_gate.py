@@ -39,7 +39,7 @@ async def run(
     )
     system = render("persona.md.j2", **persona_kwargs)
     user = render("final_gate.md.j2", revised=revised, **persona_kwargs)
-    resp = await llm.chat(system=system, user=user, model=model, max_tokens=2048)
+    resp = await llm.chat(system=system, user=user, model=model, max_tokens=4096)
     storage.log_llm_call(
         session_id=session.id, stage="final_gate", model=resp.model,
         prompt_tokens=resp.prompt_tokens, completion_tokens=resp.completion_tokens,

@@ -1,9 +1,10 @@
-"""Secrets loader: env > /etc/review-agent/secrets.env > macOS keychain (dev)."""
+"""Secrets loader: env > $REVIEW_AGENT_SECRETS_FILE > /etc/review-agent/secrets.env > macOS keychain (dev)."""
 from __future__ import annotations
 
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 ENV_FILE_DEFAULT = "/etc/review-agent/secrets.env"
@@ -14,6 +15,22 @@ SECRET_KEYS = (
     "LARK_VERIFICATION_TOKEN",
     "LARK_ENCRYPT_KEY",
 )
+# non-secret env vars that share the same env file (for convenience)
+TUNABLE_ENV_KEYS = (
+    "REVIEW_AGENT_MODEL",
+    "REVIEW_AGENT_FAST_MODEL",
+)
+
+
+def secrets_file_path() -> Path:
+    explicit = os.environ.get("REVIEW_AGENT_SECRETS_FILE")
+    if explicit:
+        return Path(explicit)
+    system_path = Path(ENV_FILE_DEFAULT)
+    # Fall back to user path when /etc isn't writable (typical user-mode install)
+    if system_path.exists() or (hasattr(os, "geteuid") and os.geteuid() == 0):
+        return system_path
+    return Path(os.path.expanduser("~/.config/review-agent/secrets.env"))
 
 
 def _read_env_file(path: Path) -> dict[str, str]:
@@ -81,3 +98,40 @@ def get(key: str, *, required: bool = True) -> str:
     if required:
         raise RuntimeError(f"missing secret: {key}")
     return ""
+
+
+def upsert_env_value(key: str, value: str, *, env_file: str | None = None) -> Path:
+    """Write KEY=VALUE into the env file (replace existing line or append).
+
+    Used by `review-agent set-model`. Atomic via tmp+rename. Preserves other lines + comments.
+    """
+    path = Path(env_file) if env_file else secrets_file_path()
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lines = []
+    else:
+        lines = path.read_text().splitlines()
+    new_line = f"{key}={value}"
+    replaced = False
+    for i, raw in enumerate(lines):
+        s = raw.strip()
+        if not s or s.startswith("#"):
+            continue
+        if s.split("=", 1)[0].strip() == key:
+            lines[i] = new_line
+            replaced = True
+            break
+    if not replaced:
+        lines.append(new_line)
+    body = "\n".join(lines).rstrip() + "\n"
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".tmp.")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(body)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except Exception:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+    return path

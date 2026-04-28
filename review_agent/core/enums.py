@@ -36,6 +36,7 @@ class Stage(StrEnum):
     SCANNING = "scanning"
     QA_ACTIVE = "qa_active"
     QA_ACTIVE_REOPENED = "qa_active_reopened"
+    AWAITING_CLOSE_CONFIRMATION = "awaiting_close_confirmation"  # Issue #4
     AWAITING_FINAL_DRAFT = "awaiting_final_draft"
     MERGING = "merging"
     FINAL_GATING = "final_gating"

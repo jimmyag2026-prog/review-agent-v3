@@ -46,6 +46,10 @@ class Session:
     last_error: str | None = None
     fail_count: int = 0
     meta: dict[str, Any] = field(default_factory=dict)
+    # frozen-at-session-start config snapshots (loaded from fs files by storage)
+    admin_style: str = ""
+    review_rules: str = ""
+    responder_profile: str = ""
 
 
 @dataclass

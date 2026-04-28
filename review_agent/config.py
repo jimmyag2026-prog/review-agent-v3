@@ -73,6 +73,10 @@ class ReviewCfg:
     top_n_findings: int = 5
     final_gate_max_fail_count: int = 2
     session_close_grace_seconds: int = 30
+    # Issue #2: when an unknown sender DMs the bot, auto-create them as a
+    # Requester paired with the (sole) Admin's pairing Responder. Disable this
+    # to require manual `review-agent add-user` (whitelist-only mode).
+    auto_register_requesters: bool = True
 
 
 @dataclass
@@ -128,8 +132,16 @@ def _from_env(cfg: Config) -> Config:
         cfg.lark.app_id = v
     if v := os.environ.get("REVIEW_AGENT_MODEL"):
         cfg.llm.default_model = v
+    if v := os.environ.get("REVIEW_AGENT_FAST_MODEL"):
+        cfg.llm.fast_model = v
+    if v := os.environ.get("REVIEW_AGENT_LLM_PROVIDER"):
+        cfg.llm.provider = v
+    if v := os.environ.get("REVIEW_AGENT_LLM_BASE_URL"):
+        cfg.llm.base_url = v
     if v := os.environ.get("REVIEW_AGENT_MAX_ROUNDS"):
         cfg.review.max_rounds = int(v)
     if v := os.environ.get("REVIEW_AGENT_TOP_N"):
         cfg.review.top_n_findings = int(v)
+    if v := os.environ.get("REVIEW_AGENT_AUTO_REGISTER"):
+        cfg.review.auto_register_requesters = v.lower() not in ("0", "false", "no", "off")
     return cfg

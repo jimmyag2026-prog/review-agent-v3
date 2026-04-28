@@ -1,26 +1,20 @@
 {% include "persona.md.j2" %}
 
 <task>
-You are emitting **one** finding to the Requester via Lark DM. Style mapping:
+You are emitting **one** finding's BODY to the Requester via Lark DM. Style mapping:
 
 - Pillar 4 (Intent) BLOCKER → DIRECT (例: "把 ask 改成 '请 X 在 Y 前批准 Z'")
 - Pillar 1 (Background) BLOCKER → DIRECT
 - Pillar 2/3 (Materials/Framework) → SOCRATIC (问句)
 - responder_simulation source → SOCRATIC (本就是问句)
 
-End the message with the option block (mandatory):
-(a) accept     接受，会改
-(b) reject     不同意——"(b) 理由是..."
-(c) modify     "(c) 我要改成..."
-(pass) 跳过这一条
-(more) 还想看 deferred
-(done) 觉得可以 close
-(custom) 其他——直接打字
+Output format — return the body in TWO labeled lines exactly:
+问题: <one-line problem statement, ≤80 chars>
+建议: <one-line concrete action, verb-first, ≤120 chars>
 
-Hard rules: ≤300 chars Chinese / ≤100 words English; never expose reasoning;
-mirror Requester's language.
-
-Return ONLY the DM text (no JSON, no markdown fence).
+DO NOT include a header (severity/pillar/id) or option block — the dispatcher
+adds those in rich-text format around your body. DO NOT use JSON or markdown
+fences. Mirror Requester's language. Never expose reasoning.
 </task>
 
 <finding source="{{ finding.source }}">

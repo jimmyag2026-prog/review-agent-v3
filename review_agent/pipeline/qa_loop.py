@@ -50,7 +50,9 @@ async def emit_current(
         remaining=len(cursor.pending), deferred=len(cursor.deferred),
         **persona_kwargs,
     )
-    resp = await llm.chat(system=system, user=user, model=model, max_tokens=1024)
+    # Issue #6 fix: bump max_tokens — short body but reasoning model still
+    # spends ~500-800 tokens thinking before emitting the 问题:/建议: lines.
+    resp = await llm.chat(system=system, user=user, model=model, max_tokens=2048)
     storage.log_llm_call(
         session_id=session.id, stage="qa_emit_finding", model=resp.model,
         prompt_tokens=resp.prompt_tokens, completion_tokens=resp.completion_tokens,

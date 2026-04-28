@@ -14,3 +14,4 @@ class IncomingMessage:
     chat_id: str
     create_time: str  # ms timestamp string
     message_id: str
+    file_key: str = ""  # present for file/image/audio messages

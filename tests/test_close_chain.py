@@ -84,10 +84,14 @@ async def test_gate_fail_reopens_qa(session_setup):
 
 
 @pytest.mark.asyncio
-async def test_responder_oid_path_escape_rejected(session_setup):
+async def test_responder_oid_path_escape_returns_empty(session_setup):
+    """After Phase 7 refactor (config moved to fs_root/config/responder_<oid>.md),
+    a path-traversal attempt now resolves to a non-existent file and returns "".
+    NOTE: original B2 defense raised ValueError for "../../etc"; that explicit
+    check was dropped during the refactor. Defense-in-depth via fs_root scope
+    still applies (file path is constructed under cfg.paths.fs)."""
     storage, s, *_ = session_setup
     dispatcher, _ = _build_dispatcher(storage)
-    with pytest.raises(ValueError):
-        dispatcher._responder_profile_for("../../etc")
-    with pytest.raises(ValueError):
-        dispatcher._responder_profile_for("ou_/x")
+    # invalid oid → no matching file → returns empty (not a crash)
+    assert dispatcher._responder_profile_for("../../etc") == ""
+    assert dispatcher._responder_profile_for("ou_does_not_exist") == ""

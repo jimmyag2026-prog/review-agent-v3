@@ -39,7 +39,10 @@ async def run(
         subject=session.subject or "(untitled)", round=session.round_no,
         normalized=normalized, **persona_kwargs,
     )
-    resp_a = await llm.chat(system=system, user=user_a, model=model, max_tokens=4096)
+    # Issue #6 fix: bump max_tokens. DeepSeek reasoning models can spend 3-4k
+    # tokens just thinking before emitting JSON; if max_tokens is too tight
+    # the reasoning eats all of it and content comes back empty (finish=length).
+    resp_a = await llm.chat(system=system, user=user_a, model=model, max_tokens=8192)
     storage.log_llm_call(
         session_id=session.id, stage="scan_four_pillar", model=resp_a.model,
         prompt_tokens=resp_a.prompt_tokens, completion_tokens=resp_a.completion_tokens,
@@ -52,7 +55,7 @@ async def run(
         "scan_responder_sim.md.j2",
         subject=session.subject or "(untitled)", normalized=normalized, **persona_kwargs,
     )
-    resp_b = await llm.chat(system=system, user=user_b, model=model, max_tokens=2048)
+    resp_b = await llm.chat(system=system, user=user_b, model=model, max_tokens=4096)
     storage.log_llm_call(
         session_id=session.id, stage="scan_responder_sim", model=resp_b.model,
         prompt_tokens=resp_b.prompt_tokens, completion_tokens=resp_b.completion_tokens,

@@ -61,6 +61,9 @@ def test_build_summary_wraps_user_doc():
 
 
 def test_qa_emit_finding():
+    """Issue #3b: qa_emit_finding now returns ONLY the body
+    (问题:/建议: lines); the dispatcher renders header + option block in
+    rich-text post format around it."""
     out = render(
         "qa_emit_finding.md.j2",
         finding={"source": "four_pillar_scan", "pillar": "Intent",
@@ -68,8 +71,10 @@ def test_qa_emit_finding():
                  "simulated_question": None, "anchor": {"snippet": ""}},
         round=1, max_rounds=3, remaining=2, deferred=0, **_ctx(),
     )
-    assert "(a) accept" in out
-    assert "(pass)" in out
+    # body contract: 问题 / 建议 labels, NO option block, NO header
+    assert "问题" in out
+    assert "建议" in out
+    assert "(a) accept" not in out  # dispatcher emits this in rich post
 
 
 def test_merge_draft():

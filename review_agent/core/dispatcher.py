@@ -21,6 +21,7 @@ from ..lark.client import LarkClient
 from ..lark.types import IncomingMessage
 from ..llm.base import LLMClient, LLMTerminalFailure
 from ..pipeline import build_summary, confirm_topic, deliver, final_gate, merge_draft, qa_loop, scan
+from ..pipeline import _format
 from ..pipeline._intents import parse_reply_intent
 from ..pipeline._prompts import render
 from ..pipeline.delivery_backends import (
@@ -79,13 +80,14 @@ class Dispatcher:
     # ── inbound DM dispatch ─────────────────────────────
     async def _handle_incoming(self, msg: IncomingMessage) -> None:
         sender = self.storage.get_user(msg.sender_open_id)
+
+        # Issue #2: auto-register unknown senders as Requester paired with
+        # the (sole) admin's pairing Responder. Bypass with config flag.
         if sender is None:
-            await self._safe_dm(msg.sender_open_id, render("dm_templates.md.j2") + "")
-            await self._safe_dm(
-                msg.sender_open_id,
-                "Hi, I'm review-agent. Ask my admin to add you.",
-            )
-            return
+            sender = await self._maybe_auto_register(msg)
+            if sender is None:
+                # auto-register declined (no admin set up yet, or flag off)
+                return
 
         active = self.storage.get_active_session_for(sender.open_id)
 
@@ -96,12 +98,76 @@ class Dispatcher:
                 await self._handle_requester_no_session(sender, msg)
             return
 
-        # Admin / Responder: v0 just acknowledges; full admin chat is via CLI
+        # pure Admin / Responder (no Requester role): v0 just acknowledges
         await self._safe_dm(
             sender.open_id,
             f"Hi {sender.display_name}, admin/responder controls live in the CLI / dashboard."
             " I'll DM you summaries when sessions close.",
         )
+
+    async def _maybe_auto_register(self, msg: IncomingMessage) -> User | None:
+        """Auto-create a Requester for an unknown sender. Returns the new
+        User if registration succeeded, None if we declined (caller must stop)."""
+        if not self.cfg.review.auto_register_requesters:
+            await self._safe_dm(
+                msg.sender_open_id,
+                "Hi, I'm review-agent. Auto-registration is disabled — ask the admin to add you.",
+            )
+            return None
+
+        admins = self.storage.list_users(Role.ADMIN)
+        if not admins:
+            # no admin yet → cannot pair, refuse to avoid open-relay
+            await self._safe_dm(
+                msg.sender_open_id,
+                "Hi, I'm review-agent. The admin hasn't finished setup yet. Try again later.",
+            )
+            _logger.warning("auto-register refused for %s: no admin in db", msg.sender_open_id)
+            return None
+
+        admin = admins[0]
+        if Role.RESPONDER in admin.roles:
+            responder_oid = admin.open_id
+        else:
+            responders = self.storage.list_users(Role.RESPONDER)
+            responder_oid = responders[0].open_id if responders else admin.open_id
+
+        display_name = await self._lookup_display_name(msg.sender_open_id) or "New user"
+
+        new_user = User(
+            open_id=msg.sender_open_id,
+            display_name=display_name,
+            roles=[Role.REQUESTER],
+            pairing_responder_oid=responder_oid,
+        )
+        self.storage.upsert_user(new_user)
+        _logger.info("auto-registered Requester %s (%s) → responder=%s",
+                     msg.sender_open_id, display_name, responder_oid)
+
+        # Issue #7: welcome with tutorial-style onboarding (no jargon)
+        await self._safe_dm(
+            msg.sender_open_id,
+            _format.welcome_message(
+                requester_name=display_name,
+                responder_name=admin.display_name,
+            ),
+        )
+        await self._safe_dm(
+            admin.open_id,
+            _format.admin_notify_message(
+                requester_name=display_name,
+                requester_oid=msg.sender_open_id,
+            ),
+        )
+        return new_user
+
+    async def _lookup_display_name(self, open_id: str) -> str | None:
+        try:
+            user = await self.lark.get_user(open_id)
+            return user.get("name") or user.get("nick_name") or None
+        except Exception as e:
+            _logger.debug("lark.get_user(%s) failed: %s", open_id, e)
+            return None
 
     async def _handle_requester_no_session(self, user: User, msg: IncomingMessage) -> None:
         responder = (
@@ -120,23 +186,116 @@ class Dispatcher:
             admin_style=admin_style, review_rules=review_rules,
             responder_profile=responder_profile,
         )
-        # save raw text input (file handling is separate; v0 covers text + saved-as-file)
+
+        # ── Phase 8: multimodal dispatch ───────────────────
+        try:
+            path = await self._save_and_ingest_multimodal(user, session, msg)
+        except Exception as e:
+            await self._fail_session(session, Stage.INGEST_FAILED, "ingest", e)
+            return
+        if path is None:
+            return  # already sent a DM (unsupported / too large / etc.)
+
+        self.storage.update_session(session.id, stage=Stage.SUBJECT_CONFIRMATION)
+        await self._do_confirm_topic(session.id)
+
+    async def _save_and_ingest_multimodal(
+        self, user: User, session: Session, msg: IncomingMessage,
+    ) -> Path | None:
+        """Download, save, and ingest a message. Returns the saved file path
+        on success, None if we sent a DM and the caller should stop."""
+        fs_root = self.cfg.paths.fs
+        iso = now_iso().replace(":", "")
+
+        # ── Text message (existing path, unchanged) ──
         if msg.msg_type == "text" and msg.content_text.strip():
             text_path = resolve_session_path(
-                self.cfg.paths.fs, user.open_id, session.id,
-                f"input/{now_iso().replace(':', '')}_text.md",
+                fs_root, user.open_id, session.id,
+                f"input/{iso}_text.md",
             )
             atomic_write(text_path, msg.content_text)
-            try:
-                result = await self.ingest.run(session, text_path.name)
-            except Exception as e:
-                await self._fail_session(session, Stage.INGEST_FAILED, "ingest", e)
-                return
-            self.storage.update_session(session.id, stage=Stage.SUBJECT_CONFIRMATION)
-            await self._do_confirm_topic(session.id)
-        else:
-            await self._safe_dm(user.open_id,
-                                "收到。文件类型 v0 还不支持，能直接贴正文给我吗？")
+            await self.ingest.run(session, text_path.name)
+            return text_path
+
+        # ── Image message ──
+        if msg.msg_type == "image" and msg.file_key:
+            raw, _, _ = await self.lark.download_attachment(
+                msg.message_id, msg.file_key, kind="image",
+            )
+            img_path = resolve_session_path(
+                fs_root, user.open_id, session.id,
+                f"input/{iso}_image.jpg",
+            )
+            img_path.write_bytes(raw)
+            await self.ingest.run(session, img_path.name)
+            return img_path
+
+        # ── File message ──
+        if msg.msg_type == "file" and msg.file_key:
+            raw, _, _ = await self.lark.download_attachment(
+                msg.message_id, msg.file_key, kind="file",
+            )
+            ext = self._guess_ext_from_content_raw(msg.content_raw)
+            file_path = resolve_session_path(
+                fs_root, user.open_id, session.id,
+                f"input/{iso}_file{ext}",
+            )
+            file_path.write_bytes(raw)
+            await self.ingest.run(session, file_path.name)
+            return file_path
+
+        # ── Audio message ──
+        if msg.msg_type == "audio" and msg.file_key:
+            raw, _, _ = await self.lark.download_attachment(
+                msg.message_id, msg.file_key, kind="audio",
+            )
+            audio_path = resolve_session_path(
+                fs_root, user.open_id, session.id,
+                f"input/{iso}_audio.mp3",
+            )
+            audio_path.write_bytes(raw)
+            await self.ingest.run(session, audio_path.name)
+            return audio_path
+
+        # ── URL detection in text messages ──
+        if msg.msg_type == "text" and msg.content_text.strip():
+            urls = _extract_urls_simple(msg.content_text)
+            if urls:
+                url_path = resolve_session_path(
+                    fs_root, user.open_id, session.id,
+                    f"input/{iso}_urls.txt",
+                )
+                atomic_write(url_path, "\n".join(urls))
+                try:
+                    await self.ingest.run(session, url_path.name)
+                except Exception:
+                    text_path = resolve_session_path(
+                        fs_root, user.open_id, session.id,
+                        f"input/{iso}_text.md",
+                    )
+                    atomic_write(text_path, msg.content_text)
+                    await self.ingest.run(session, text_path.name)
+                    return text_path
+                return url_path
+
+        await self._safe_dm(
+            user.open_id,
+            "收到。这个类型我还不会处理（v0 还不支持图片/文件/语音），能直接贴正文给我吗？",
+        )
+        return None
+
+    @staticmethod
+    def _guess_ext_from_content_raw(content_raw: str) -> str:
+        import json
+        try:
+            parsed = json.loads(content_raw)
+            fname = parsed.get("file_name", "")
+            if fname:
+                from pathlib import Path
+                return Path(fname).suffix
+        except (json.JSONDecodeError, Exception):
+            pass
+        return ".bin"
 
     async def _handle_requester_in_session(
         self, user: User, session: Session, msg: IncomingMessage
@@ -161,10 +320,44 @@ class Dispatcher:
             if outcome.action == "emit_next":
                 await self._emit_next_finding(session.id)
             elif outcome.action == "propose_close":
-                await self._safe_dm(user.open_id, outcome.dm_text or "可以 close 了？回 a 确认。")
+                self.storage.update_session(
+                    session.id, stage=Stage.AWAITING_CLOSE_CONFIRMATION,
+                )
+                await self._safe_dm(
+                    user.open_id,
+                    outcome.dm_text or
+                    "BLOCKER 都闭合了 ✅\n回 `a` close 出 summary，或 `more` 看 deferred。",
+                )
             elif outcome.action == "force_close":
                 await self._safe_dm(user.open_id, "已强制 close，正在出 summary…")
                 await self._enqueue_close_chain(session.id, forced=True)
+            return
+
+        if session.stage == Stage.AWAITING_CLOSE_CONFIRMATION:
+            await self._handle_close_confirmation(user, session, msg)
+            return
+
+        BUSY_STAGES = {
+            Stage.SCANNING: ("scan_four_pillar", "_do_scan",
+                             "我还在挑刺中，再等 30-60 秒"),
+            Stage.MERGING: ("merge_draft", "_do_merge",
+                            "稿件整合中，再等 20-40 秒"),
+            Stage.FINAL_GATING: ("final_gate", "_do_final_gate_default",
+                                  "终审中，再等 20-40 秒"),
+            Stage.CLOSING: ("build_summary", "_do_build_and_deliver",
+                            "summary 生成中，再等 30-60 秒"),
+        }
+        if session.stage in BUSY_STAGES:
+            llm_stage_key, restart_method, busy_msg = BUSY_STAGES[session.stage]
+            if not self.storage.has_llm_call_for_stage(session.id, llm_stage_key):
+                await self._safe_dm(
+                    user.open_id,
+                    f"上次我处理 {session.stage.value} 时被打断了，重新跑（约 30-60 秒）",
+                )
+                fn = getattr(self, restart_method)
+                await fn(session.id)
+            else:
+                await self._safe_dm(user.open_id, busy_msg)
             return
 
         intent, _ = parse_reply_intent(msg.content_text, stage="qa_loop")
@@ -172,6 +365,48 @@ class Dispatcher:
             await self._enqueue_close_chain(session.id, forced=False)
         else:
             await self._safe_dm(user.open_id, f"当前 session 在 {session.stage.value}，等我处理完就接着聊。")
+
+    async def _do_final_gate_default(self, session_id: str) -> None:
+        """Wrapper for BUSY_STAGES (final_gate needs forced kwarg)."""
+        await self._do_final_gate(session_id, forced=False)
+
+    async def _handle_close_confirmation(
+        self, user: User, session: Session, msg: IncomingMessage
+    ) -> None:
+        """Issue #4: AWAITING_CLOSE_CONFIRMATION stage handler. Interprets the
+        Requester's reply to the 'BLOCKER 已闭合 ✅ close 还是 more?' prompt."""
+        intent, _remainder = parse_reply_intent(msg.content_text, stage="qa_loop")
+        self.storage.log_conversation(
+            session, role="requester", text=msg.content_text, intent=intent.value,
+        )
+        if intent in (Intent.ACCEPT, Intent.DONE, Intent.PICK_A):
+            self.storage.update_session(session.id, stage=Stage.MERGING)
+            await self._safe_dm(user.open_id, "好，正在出 summary，约 30-60 秒…")
+            await self._enqueue_close_chain(session.id, forced=False)
+            return
+        if intent in (Intent.MORE, Intent.PICK_B):
+            cursor = self.storage.load_cursor(session)
+            moved = cursor.pull_deferred(self.cfg.review.top_n_findings)
+            if moved == 0:
+                await self._safe_dm(user.open_id, "deferred 也空了。回 `a` close 出 summary。")
+                return
+            cursor.advance()
+            self.storage.save_cursor(session, cursor)
+            self.storage.update_session(session.id, stage=Stage.QA_ACTIVE)
+            await self._safe_dm(user.open_id, f"📥 拉了 {moved} 条 deferred 进来，先看第一条：")
+            await self._emit_next_finding(session.id)
+            return
+        if intent == Intent.FORCE_CLOSE:
+            await self._safe_dm(user.open_id, "已强制 close，正在出 summary…")
+            await self._enqueue_close_chain(session.id, forced=True)
+            return
+        await self._safe_dm(
+            user.open_id,
+            "BLOCKER 都闭合了 ✅\n"
+            "- `a` (或 `done`) — close 出 summary\n"
+            "- `more` — 再看几条 deferred (IMPROVEMENT)\n"
+            "- 其他文字 — 我会理解为想补充，请说清要补啥",
+        )
 
     # ── stage helpers (each one idempotent / re-entrant) ─
     async def _do_confirm_topic(self, session_id: str) -> None:
@@ -198,7 +433,7 @@ class Dispatcher:
         session = self.storage.get_session(session_id)
         assert session is not None
         if session.stage not in (Stage.SCANNING, Stage.SUBJECT_CONFIRMATION):
-            return  # idempotent
+            return
         self.storage.update_session(session.id, stage=Stage.SCANNING)
         responder = self.storage.get_user(session.responder_oid)
         admin_style, review_rules = self._frozen_configs(session)
@@ -222,7 +457,7 @@ class Dispatcher:
         responder = self.storage.get_user(session.responder_oid)
         admin_style, review_rules = self._frozen_configs(session)
         try:
-            text = await qa_loop.emit_current(
+            body_text = await qa_loop.emit_current(
                 storage=self.storage, llm=self.llm,
                 model=self.cfg.llm.default_model, session=session,
                 responder_user=responder,
@@ -233,8 +468,37 @@ class Dispatcher:
         except LLMTerminalFailure as e:
             await self._fail_session(session, Stage.QA_ACTIVE, "qa_loop", e)
             return
-        if text:
-            await self._safe_dm(session.requester_oid, text)
+        if not body_text:
+            return
+        cursor = self.storage.load_cursor(session)
+        findings = self.storage.load_findings(session)
+        f = next((x for x in findings if x.get("id") == cursor.current_id), None)
+        if f is None:
+            await self._safe_dm(session.requester_oid, body_text)
+            return
+        post = _format.build_finding_post(
+            finding_id=f.get("id", ""),
+            pillar=f.get("pillar", ""),
+            severity=f.get("severity", ""),
+            source=f.get("source", ""),
+            body_text=body_text,
+            round_no=session.round_no,
+            max_rounds=self.cfg.review.max_rounds,
+            remaining=len(cursor.pending),
+            deferred=len(cursor.deferred),
+        )
+        try:
+            await self.lark.send_dm_post(session.requester_oid, post)
+        except Exception as e:
+            _logger.warning("send_dm_post failed (%s); falling back to text", e)
+            fallback = _format.build_text_fallback(
+                finding_id=f.get("id", ""), pillar=f.get("pillar", ""),
+                severity=f.get("severity", ""), source=f.get("source", ""),
+                body_text=body_text, round_no=session.round_no,
+                max_rounds=self.cfg.review.max_rounds,
+                remaining=len(cursor.pending), deferred=len(cursor.deferred),
+            )
+            await self._safe_dm(session.requester_oid, fallback)
 
     async def _do_merge(self, session_id: str) -> None:
         session = self.storage.get_session(session_id)
@@ -313,103 +577,74 @@ class Dispatcher:
                 )
                 await self._safe_dm(
                     s.requester_oid,
-                    f"final-gate 发现 {len(regressions)} 处回归，再过一轮。第一条："
+                    f"终审发现 {len(regressions)} 条新 BLOCKER/REGRESSION，重启 Q&A 补充。",
                 )
                 await self._emit_next_finding(session_id)
                 return
-            # fail_count over cap → force partial + still deliver
-            self.storage.update_session(session_id, verdict=Verdict.FORCED_PARTIAL,
-                                         stage=Stage.CLOSING)
+            else:
+                _logger.warning(
+                    "final gate failed %d times for %s — forcing PARTIAL",
+                    s.fail_count, session_id,
+                )
+        self.storage.update_session(session_id, stage=Stage.CLOSING)
         await self._do_build_and_deliver(session_id)
 
     def _extract_open_blockers(self, session: Session) -> list[str]:
-        from ..core.enums import FindingStatus, Severity
         findings = self.storage.load_findings(session)
-        return [
-            f["id"] for f in findings
-            if f.get("severity") == Severity.BLOCKER.value
-            and f.get("status") in (FindingStatus.OPEN.value, None)
-        ]
+        return [f.get("id", "") for f in findings
+                if f.get("status") == "open"
+                and f.get("severity") in ("BLOCKER", "REGRESSION")]
 
-    # ── failure helper ──────────────────────────────────
-    async def _fail_session(self, session: Session, stage: Stage, stage_name: str, err: Exception) -> None:
-        self.storage.update_session(
-            session.id, stage=Stage.FAILED, status=SessionStatus.FAILED,
-            failed_stage=stage, last_error=str(err)[:500],
-        )
-        msg = render("dm_templates.md.j2") + ""
-        await self._safe_dm(
-            session.requester_oid,
-            self._failure_text(stage_name),
-        )
-
-    def _failure_text(self, stage_name: str) -> str:
-        table = {
-            "ingest": "材料处理卡住了。Admin 已收通知，可以换种格式重发（直接贴正文最稳）。",
-            "confirm_topic": "我在确认主题时卡了。再发一遍材料试试，或等 admin 处理。",
-            "scan": "扫描材料卡住了。这次的 review 暂停，admin 已收通知。",
-            "qa_loop": "我突然卡了。最近的回复我会保留，等会再发一次试试。",
-            "merge_draft": "整合稿件失败。已存的 dissent + accepted findings 都还在。",
-            "final_gate": "final gate 失败。dissent + 最终材料都已存，admin 会人工处理。",
-            "build_summary": "Summary 生成失败。admin 已收通知。",
-        }
-        return table.get(stage_name, "卡了一下，admin 已收通知。")
-
-    # ── lookup helpers ──────────────────────────────────
+    # ── config helpers ──────────────────────────────────
     def _global_configs(self) -> tuple[str, str]:
-        fs = Path(self.cfg.paths.fs)
-        admin_style = (fs / "admin_style.md").read_text() if (fs / "admin_style.md").exists() else _DEFAULT_ADMIN_STYLE
-        review_rules = (fs / "rules" / "review_rules.md").read_text() if (fs / "rules" / "review_rules.md").exists() else _DEFAULT_REVIEW_RULES
+        admin_style_path = Path(self.cfg.paths.fs) / "config" / "admin_style.md"
+        review_rules_path = Path(self.cfg.paths.fs) / "config" / "review_rules.md"
+        admin_style = admin_style_path.read_text() if admin_style_path.exists() else ""
+        review_rules = review_rules_path.read_text() if review_rules_path.exists() else ""
         return admin_style, review_rules
 
-    def _responder_profile_for(self, responder_oid: str) -> str:
-        # round-final B2: defense-in-depth, reject path-escape characters in oid
-        if "/" in responder_oid or ".." in responder_oid or responder_oid.startswith("."):
-            raise ValueError(f"invalid responder_oid: {responder_oid!r}")
-        path = Path(self.cfg.paths.fs) / "users" / responder_oid / "profile.md"
-        if path.exists():
-            return path.read_text()
-        return _DEFAULT_RESPONDER_PROFILE
-
     def _frozen_configs(self, session: Session) -> tuple[str, str]:
-        fs = Path(session.fs_path)
-        return (
-            (fs / "admin_style.md").read_text(),
-            (fs / "review_rules.md").read_text(),
-        )
+        return (session.admin_style or "", session.review_rules or "")
+
+    def _responder_profile_for(self, responder_oid: str) -> str:
+        path = Path(self.cfg.paths.fs) / "config" / f"responder_{responder_oid}.md"
+        return path.read_text() if path.exists() else ""
 
     def _frozen_profile(self, session: Session) -> str:
-        return (Path(session.fs_path) / "profile.md").read_text()
+        return session.responder_profile or ""
+
+    # ── utilities ───────────────────────────────────────
 
     async def _safe_dm(self, open_id: str, text: str) -> None:
         try:
             await self.lark.send_dm_text(open_id, text)
-        except Exception as e:  # never let outbound failure crash the worker
-            _logger.warning("send_dm_text failed to %s: %s", open_id, e)
+        except Exception as e:
+            _logger.error("_safe_dm(%s, …) failed: %s", open_id, e)
+
+    async def _fail_session(
+        self, session: Session, stage: Stage, label: str, exc: Exception,
+    ) -> None:
+        _logger.error("session %s failed at %s (%s): %s", session.id, stage, label, exc)
+        self.storage.update_session(
+            session.id,
+            stage=stage,
+            status=SessionStatus.FAILED,
+        )
+        message = "系统错误，session 失败了。稍后再试。"
+        if isinstance(exc, LLMTerminalFailure):
+            message = f"LLM 调用失败 ({label})，session 已终止。联系 admin。"
+        await self._safe_dm(session.requester_oid, message)
 
 
-_DEFAULT_ADMIN_STYLE = """tone: direct, no corporate fluff
-language_mirroring: true
-response_length_cap_chars: 300
-message_pacing: one_finding_per_message
-emoji_policy: minimal
-document_editing: suggest
-"""
-
-_DEFAULT_REVIEW_RULES = """- 4 pillars: Background / Materials / Framework / Intent
-- Intent is CSW gate (always BLOCKER if vague)
-- Max 3 rounds (5 with explicit Requester request)
-- Top 5 findings emitted; rest deferred until 'more'
-- Dissent always recorded; never silently dropped
-"""
-
-_DEFAULT_RESPONDER_PROFILE = """# Responder Profile (default)
-我是一个挑剔的高管。我看材料时关注：
-- ROI 是否清晰：收益和成本必须对得上
-- 数据来源：每个数字必须有出处和日期
-- 反向案例：方案的最大反方观点是什么
-- Plan B：如果主推方案失败，备选是什么
-- Stakeholder 真实声音，不是想象
-
-我讨厌的：含糊 ask、把决策推回我、空话（"我们要重视 X"）。
-"""
+def _extract_urls_simple(text: str) -> list[str]:
+    """Extract http/https URLs from text. Returns deduplicated list."""
+    import re
+    urls = re.findall(r"https?://[^\s<>\"')\]]+", text)
+    cleaned = [u.rstrip(".,;:!?）)") for u in urls]
+    seen = set()
+    result = []
+    for u in cleaned:
+        if u not in seen:
+            seen.add(u)
+            result.append(u)
+    return result

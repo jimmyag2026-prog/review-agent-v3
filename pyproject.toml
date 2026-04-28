@@ -32,6 +32,13 @@ dev = [
 ]
 ingest = [
     "pdfminer.six>=20231228",
+    "pytesseract>=0.3",
+    "Pillow>=10",
+    "openai>=1.0",
+    "readability-lxml>=0.8",
+    "beautifulsoup4>=4.12",
+    "lxml>=5",
+    "markdownify>=0.12",
 ]
 
 [project.scripts]

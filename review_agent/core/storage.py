@@ -85,6 +85,17 @@ class Storage:
             users = [u for u in users if u.has_role(role)]
         return users
 
+    def delete_user(self, open_id: str) -> bool:
+        """Remove user row. Cancelled / closed sessions referencing this user
+        are kept (audit trail); FK is bypassed for the delete."""
+        conn = self.conn()
+        conn.execute("PRAGMA foreign_keys=OFF")
+        try:
+            cur = conn.execute("DELETE FROM users WHERE open_id=?", (open_id,))
+            return cur.rowcount > 0
+        finally:
+            conn.execute("PRAGMA foreign_keys=ON")
+
     # ── sessions ──────────────────────────────────────────
     def create_session(
         self,
@@ -176,7 +187,7 @@ class Storage:
         return [self._row_to_session(r) for r in rows]
 
     def _row_to_session(self, row: sqlite3.Row) -> Session:
-        return Session(
+        s = Session(
             id=row["id"],
             requester_oid=row["requester_oid"],
             responder_oid=row["responder_oid"],
@@ -194,6 +205,23 @@ class Storage:
             fail_count=row["fail_count"],
             meta=json.loads(row["meta"]) if row["meta"] else {},
         )
+        # Populate frozen-config fields from the per-session fs snapshots so
+        # dispatcher's `_frozen_configs(session)` / `_frozen_profile(session)`
+        # can access them as plain attributes (refactor introduced by linter).
+        fs = Path(s.fs_path)
+        try:
+            ap = fs / "admin_style.md"
+            if ap.exists():
+                s.admin_style = ap.read_text(encoding="utf-8")
+            rp = fs / "review_rules.md"
+            if rp.exists():
+                s.review_rules = rp.read_text(encoding="utf-8")
+            pp = fs / "profile.md"
+            if pp.exists():
+                s.responder_profile = pp.read_text(encoding="utf-8")
+        except OSError:
+            pass  # frozen files missing → fall back to "" defaults
+        return s
 
     # ── findings (jsonl primary, db only for cursor counts) ──
     def append_finding(self, session: Session, finding: Finding) -> None:
@@ -342,6 +370,16 @@ class Storage:
             "WHERE status='running'"
         )
         return cur.rowcount
+
+    def has_llm_call_for_stage(self, session_id: str, stage: str) -> bool:
+        """Issue #5: detect whether a given LLM-using stage has already started
+        (or completed) for a session. Used by dispatcher to tell apart 'agent
+        is busy' from 'agent was interrupted before starting this stage'."""
+        row = self.conn().execute(
+            "SELECT 1 FROM llm_calls WHERE session_id=? AND stage=? LIMIT 1",
+            (session_id, stage),
+        ).fetchone()
+        return row is not None
 
     # ── llm calls (audit) ────────────────────────────────
     def log_llm_call(

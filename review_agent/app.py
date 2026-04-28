@@ -10,7 +10,9 @@ from .core.dispatcher import Dispatcher
 from .core.storage import Storage
 from .lark.client import LarkClient
 from .llm.deepseek import DeepSeekClient
-from .pipeline.ingest_backends import PdfBackend, TextBackend
+from .pipeline.ingest_backends import (
+    AudioBackend, ImageBackend, PdfBackend, TextBackend, WebScrapBackend,
+)
 from .routers import dashboard, health, lark_webhook
 from .tasks.queue import TaskQueue
 from .tasks.worker import run as run_worker
@@ -36,7 +38,10 @@ def build_app(config_path: str | None = None) -> FastAPI:
     )
     dispatcher = Dispatcher(
         cfg=cfg, storage=storage, llm=llm, lark=lark,
-        ingest_backends=[TextBackend(), PdfBackend()],
+        ingest_backends=[
+            TextBackend(), PdfBackend(), ImageBackend(),
+            AudioBackend(), WebScrapBackend(),
+        ],
     )
     queue = TaskQueue(storage)
 

@@ -68,6 +68,24 @@ def handle_reply(
     elif intent == Intent.CUSTOM and remainder:
         chosen = remainder
     if chosen:
-        storage.update_session(session.id, subject=chosen, stage=Stage.SCANNING)
+        # Issue #5 Bug B: trim subject so a long custom reply (e.g. user re-sent
+        # the full material as their "topic answer") doesn't end up as a
+        # 1000+ char "subject" in db.
+        chosen_label = _trim_subject(chosen)
+        storage.update_session(session.id, subject=chosen_label, stage=Stage.SCANNING)
         storage.log_conversation(session, role="requester", text=reply, intent=intent.value)
+        chosen = chosen_label
     return intent, chosen
+
+
+def _trim_subject(text: str, *, max_chars: int = 60) -> str:
+    """Reduce a possibly-long custom reply down to a subject label."""
+    s = (text or "").strip()
+    for sep in ("\n", "。", "？", "?", "!", "！"):
+        idx = s.find(sep)
+        if 0 <= idx < max_chars:
+            s = s[:idx]
+            break
+    if len(s) > max_chars:
+        s = s[: max_chars - 1] + "…"
+    return s.strip() or "(untitled)"

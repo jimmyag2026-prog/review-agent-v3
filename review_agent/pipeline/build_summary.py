@@ -48,7 +48,7 @@ async def run(
         unresolvable=unresolvable,
         **persona_kwargs,
     )
-    resp = await llm.chat(system=system, user=user, model=model, max_tokens=4096)
+    resp = await llm.chat(system=system, user=user, model=model, max_tokens=6144)
     storage.log_llm_call(
         session_id=session.id, stage="build_summary", model=resp.model,
         prompt_tokens=resp.prompt_tokens, completion_tokens=resp.completion_tokens,

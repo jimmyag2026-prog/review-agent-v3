@@ -174,6 +174,59 @@ Then:
 .venv/bin/review-agent list-users
 ```
 
+### B.6.1  Auto-register Requesters (default ON)
+
+Once the Admin is set up, **anyone in the Lark tenant who can see the bot**
+will be auto-registered as a Requester paired to the Admin's pairing
+Responder when they first DM the bot. They get a welcome message; the
+Admin gets a notification DM.
+
+If you want a whitelist-only mode (manually add each Requester via
+`add-user`), turn it off in `~/.config/review-agent/secrets.env`:
+
+```
+REVIEW_AGENT_AUTO_REGISTER=false
+```
+
+Then `systemctl --user restart review-agent`.
+
+To remove an auto-registered user:
+
+```bash
+.venv/bin/review-agent remove-user ou_xxxxxxxxxxxxxxx
+```
+
+### B.6.2  Change the LLM model
+
+v0 only ships a DeepSeek client (`llm/deepseek.py`); switching providers
+(OpenAI / Anthropic / OpenRouter) is a v3.1 roadmap item that requires a new
+client class and wiring in `app.py`. **Within DeepSeek**, you can switch
+between `deepseek-v4-pro` (default, reasoning model, 30-90s) and
+`deepseek-v4-flash` (faster, lower quality):
+
+```bash
+# default model used for scan / merge / final_gate / build_summary
+.venv/bin/review-agent set-model deepseek-v4-flash
+
+# fast model used for short stages (confirm_topic)
+.venv/bin/review-agent set-model deepseek-v4-flash --fast
+
+# show effective config
+.venv/bin/review-agent show-config
+
+# verify provider × API-key match
+.venv/bin/review-agent doctor
+
+# apply the change
+systemctl --user restart review-agent
+```
+
+`set-model` writes `REVIEW_AGENT_MODEL=…` (or `REVIEW_AGENT_FAST_MODEL=…`)
+into `secrets.env`, which overrides the value in `config.toml`.
+
+To revert to defaults: open `secrets.env` and delete the
+`REVIEW_AGENT_MODEL=` / `REVIEW_AGENT_FAST_MODEL=` line.
+
 ### B.7  First end-to-end review
 
 DM the bot a draft (text or PDF). The flow:
