@@ -120,8 +120,20 @@ def main(argv: list[str] | None = None) -> int:
         for k in ["DEEPSEEK_API_KEY", "LARK_APP_ID", "LARK_APP_SECRET",
                   "LARK_ENCRYPT_KEY", "LARK_VERIFICATION_TOKEN"]:
             (ok if k in sec else miss).append(k)
-        print(f"ok: {ok}")
-        print(f"missing: {miss}")
+        print(f"required ok: {ok}")
+        print(f"required missing: {miss}")
+        # multimodal fallback keys — optional, not counted toward exit failure
+        mm = []
+        for k in ["GEMINI_API_KEY", "OPENAI_API_KEY"]:
+            mm.append(f"{k}={'set' if k in sec else 'not set'}")
+        print(f"multimodal fallback: {' · '.join(mm)}")
+        # binary multimodal capabilities
+        import shutil as _sh
+        bins = []
+        for b in ["tesseract", "whisper-cpp"]:
+            p = _sh.which(b) or "not installed"
+            bins.append(f"{b}={'✓' if p != 'not installed' else 'missing'}")
+        print(f"multimodal local bins: {' · '.join(bins)}")
         # provider × key cross-check (round-1 I6 spirit, applied to LLM)
         provider = cfg.llm.provider.lower()
         provider_key_map = {"deepseek": "DEEPSEEK_API_KEY",

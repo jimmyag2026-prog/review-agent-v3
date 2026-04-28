@@ -26,7 +26,7 @@ class AudioBackend(IngestBackend):
     async def ingest(self, input_path: Path) -> IngestResult:
         self.validate_size(input_path.stat().st_size)
 
-        # ── primary: whisper.cpp CLI ──
+        # ── 1. local whisper.cpp (free, no network) ──
         if shutil.which("whisper-cpp") or shutil.which("whisper.cpp"):
             text = await self._run_whisper_cpp(input_path)
             if text:
@@ -36,22 +36,29 @@ class AudioBackend(IngestBackend):
                     note=f"whisper.cpp: {len(text)} chars",
                 )
 
-        # ── secondary: openai-whisper python package (only if installed) ──
+        # ── 2. local openai-whisper python package ──
         try:
             import whisper  # type: ignore  # noqa: F401
             return await self._local_whisper(input_path)
         except ImportError:
             pass
 
-        # ── fallback: OpenAI Whisper API ──
-        api_key = os.environ.get("OPENAI_API_KEY", "")
-        if not api_key:
-            raise IngestRejected(
-                "语音转文字没装（whisper-cpp / openai-whisper / OPENAI_API_KEY 都没有）。"
-                "让 admin 跑 `bash deploy/install-multimodal.sh` 一键装本地 whisper，"
-                "或在 secrets.env 里填 OPENAI_API_KEY。当前你直接贴文字给我也行。"
-            )
-        return await self._api_whisper(input_path, api_key)
+        # ── 3. Gemini audio API (free tier supports gemini-2.5-flash) ──
+        gemini_key = os.environ.get("GEMINI_API_KEY", "")
+        if gemini_key:
+            return await self._gemini_audio(input_path, gemini_key)
+
+        # ── 4. OpenAI Whisper API ──
+        openai_key = os.environ.get("OPENAI_API_KEY", "")
+        if openai_key:
+            return await self._api_whisper(input_path, openai_key)
+
+        raise IngestRejected(
+            "语音转文字没装（whisper-cpp / openai-whisper / GEMINI_API_KEY / OPENAI_API_KEY 都没有）。"
+            "让 admin 跑 `review-agent install-multimodal` 一键装本地 whisper，"
+            "或在 secrets.env 里填 GEMINI_API_KEY 或 OPENAI_API_KEY。"
+            "当前你直接贴文字给我也行。"
+        )
 
     async def _run_whisper_cpp(self, input_path: Path) -> str:
         """B3 fix: don't use --output-txt (writes to file). Use -nt + stdout."""
@@ -92,6 +99,46 @@ class AudioBackend(IngestBackend):
             backend="whisper-local",
             normalized=_prepend_meta(text, input_path),
             note=f"whisper-local base: {len(text)} chars",
+        )
+
+    async def _gemini_audio(self, input_path: Path, api_key: str) -> IngestResult:
+        """Gemini supports audio understanding via inline_data. Prompt for verbatim transcription."""
+        import base64
+        import httpx
+        model = os.environ.get("REVIEW_AGENT_GEMINI_MODEL", "gemini-2.5-flash")
+        mime = _guess_mime(input_path)
+        data_b64 = base64.b64encode(input_path.read_bytes()).decode()
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+
+        prompt = (
+            "Transcribe this audio verbatim. Return ONLY the transcribed text "
+            "(no preamble, no labels, no language note). If the audio is silent "
+            "or contains no speech, reply with exactly: [no speech detected]"
+        )
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(url, json={
+                "contents": [{
+                    "parts": [
+                        {"text": prompt},
+                        {"inline_data": {"mime_type": mime, "data": data_b64}},
+                    ],
+                }],
+                "generationConfig": {"maxOutputTokens": 4096},
+            })
+            resp.raise_for_status()
+            body = resp.json()
+            text = ""
+            try:
+                text = body["candidates"][0]["content"]["parts"][0]["text"].strip()
+            except (KeyError, IndexError):
+                pass
+
+        if not text or text == "[no speech detected]":
+            raise IngestRejected("Gemini 没识别到语音内容。可能太短或全静音。")
+        return IngestResult(
+            backend="gemini-audio",
+            normalized=_prepend_meta(text, input_path),
+            note=f"audio {model}: {len(text)} chars",
         )
 
     async def _api_whisper(self, input_path: Path, api_key: str) -> IngestResult:

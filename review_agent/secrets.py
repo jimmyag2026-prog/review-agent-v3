@@ -14,6 +14,10 @@ SECRET_KEYS = (
     "LARK_APP_SECRET",
     "LARK_VERIFICATION_TOKEN",
     "LARK_ENCRYPT_KEY",
+    # multimodal API fallbacks (optional — needed only when local
+    # tesseract / whisper.cpp aren't installed)
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
 )
 # non-secret env vars that share the same env file (for convenience)
 TUNABLE_ENV_KEYS = (
