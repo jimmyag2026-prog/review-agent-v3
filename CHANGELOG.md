@@ -1,5 +1,58 @@
 # Changelog
 
+## [3.1.1] — 2026-04-28 (Gemini multimodal fallback)
+
+Adds Google Gemini as a third multimodal fallback alongside local
+tesseract/whisper.cpp and OpenAI. Useful when admin is on Gemini's free
+tier — `gemini-2.5-flash` handles image OCR + voice transcription without
+needing a paid OpenAI key.
+
+### Fallback ordering
+
+- **Image OCR**: tesseract local → **Gemini** → OpenAI Vision → reject
+- **Audio**: whisper.cpp → openai-whisper → **Gemini** → OpenAI Whisper → reject
+
+Gemini is preferred over OpenAI when both keys are configured (free-tier
+friendliness). To prefer OpenAI, just unset `GEMINI_API_KEY`.
+
+### Configuration
+
+- `GEMINI_API_KEY` recognized in `secrets.env` (joins existing key list).
+- `REVIEW_AGENT_GEMINI_MODEL` env var (default `gemini-2.5-flash`).
+  Override to `gemini-3-pro-preview` if you've enabled paid billing.
+
+### `doctor` upgraded — full multimodal matrix in one shot
+
+```
+required ok: [DEEPSEEK_API_KEY, LARK_*, ...]
+required missing: []
+multimodal fallback: GEMINI_API_KEY=set · OPENAI_API_KEY=not set
+multimodal local bins: tesseract=missing · whisper-cpp=missing
+llm provider=deepseek key=DEEPSEEK_API_KEY ✓
+```
+
+### Test count: 140 → 147 ✅
+
+7 new tests covering Gemini paths in both backends with mocked httpx:
+- image uses Gemini when only GEMINI_API_KEY is set
+- model override via REVIEW_AGENT_GEMINI_MODEL
+- Gemini preferred when both keys configured
+- audio uses Gemini for transcription
+- "[no speech detected]" sentinel handled correctly
+- and 2 more.
+
+### Migration from v3.1.0
+
+```bash
+ssh reviewer@159.65.75.97
+cd ~/code/review-agent
+git pull
+echo "GEMINI_API_KEY=AIza..." >> ~/.config/review-agent/secrets.env
+chmod 600 ~/.config/review-agent/secrets.env
+systemctl --user restart review-agent
+.venv/bin/review-agent doctor   # confirms GEMINI_API_KEY=set
+```
+
 ## [3.1.0] — 2026-04-28 (multimodal coverage + one-click local install)
 
 Adds first-class support for every Lark message type a Requester might send.
