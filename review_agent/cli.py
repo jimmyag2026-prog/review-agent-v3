@@ -54,6 +54,12 @@ def main(argv: list[str] | None = None) -> int:
     im.add_argument("--dry-run", action="store_true",
                     help="print what would be installed, don't actually install")
 
+    so = sub.add_parser("send-onboarding",
+                         help="(re-)send the welcome / how-to-use message to a Requester")
+    so.add_argument("open_id", help="target requester open_id")
+    so.add_argument("--all", action="store_true",
+                    help="send to ALL Requesters in the db (ignores open_id)")
+
     args = p.parse_args(argv)
     # Load secrets.env into os.environ so CLI sees the same tunables (REVIEW_AGENT_MODEL etc.)
     # that the systemd service loads via EnvironmentFile=.
@@ -202,6 +208,53 @@ def main(argv: list[str] | None = None) -> int:
             cmd.append("--dry-run")
         print(f"running: {' '.join(cmd)}")
         return subprocess.call(cmd)
+
+    if args.cmd == "send-onboarding":
+        import asyncio
+        from .lark.client import LarkClient
+        from .pipeline._format import welcome_message
+
+        sec = secrets_mod.load()
+        lark = LarkClient(
+            app_id=cfg.lark.app_id or sec.get("LARK_APP_ID", ""),
+            app_secret=sec.get("LARK_APP_SECRET", ""),
+            base_url=cfg.lark.domain,
+        )
+
+        targets: list[User] = []
+        if args.all:
+            targets = [u for u in storage.list_users(Role.REQUESTER)]
+        else:
+            u = storage.get_user(args.open_id)
+            if not u:
+                print(f"error: user {args.open_id} not in db")
+                return 2
+            targets = [u]
+
+        async def _run():
+            # find the responder paired with each target (or first responder)
+            admins = storage.list_users(Role.ADMIN)
+            admin_name = admins[0].display_name if admins else "Admin"
+            responders = storage.list_users(Role.RESPONDER)
+            for t in targets:
+                resp = None
+                if t.pairing_responder_oid:
+                    resp = storage.get_user(t.pairing_responder_oid)
+                resp_name = (resp.display_name if resp else
+                             (responders[0].display_name if responders else admin_name))
+                msg = welcome_message(
+                    requester_name=t.display_name,
+                    responder_name=resp_name,
+                )
+                try:
+                    await lark.send_dm_text(t.open_id, msg)
+                    print(f"[ok] sent onboarding to {t.display_name} ({t.open_id})")
+                except Exception as e:
+                    print(f"[fail] {t.open_id}: {e}")
+            await lark.aclose()
+
+        asyncio.run(_run())
+        return 0
 
     if args.cmd == "migrate":
         print("schema applied")

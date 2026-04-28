@@ -87,12 +87,20 @@ def test_welcome_message_is_tutorial_style():
     msg = welcome_message(requester_name="Alice", responder_name="Boss")
     assert "Alice" in msg
     assert "Boss" in msg
-    assert "怎么用" in msg
-    assert "①" in msg and "②" in msg and "③" in msg
-    # no jargon
-    assert "4 柱" not in msg
+    # has the four numbered steps (Tester → me → Q&A → brief)
+    assert "①" in msg and "②" in msg and "③" in msg and "④" in msg
+    # covers v3.1 capabilities
+    assert "PDF" in msg
+    assert "图片" in msg
+    assert "语音" in msg
+    assert "飞书文档" in msg or "Lark" in msg
+    # reply menu shown
+    assert "a" in msg and "b" in msg and "c" in msg
+    assert "pass" in msg and "more" in msg and "done" in msg
+    # no internal jargon
     assert "decision-ready" not in msg
-    assert "BLOCKER" not in msg
+    # The acronym BLOCKER is now hidden (severity is shown as "必须修一下" in
+    # findings); welcome should not surface internal classifier terms.
 
 
 def test_admin_notify_message_actionable():
