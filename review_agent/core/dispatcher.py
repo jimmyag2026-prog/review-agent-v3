@@ -224,8 +224,160 @@ class Dispatcher:
             )
             return
 
-        self.storage.update_session(session.id, stage=Stage.SUBJECT_CONFIRMATION)
-        await self._do_confirm_topic(session.id)
+        # v3.2 Phase A: gate before formal review starts. DM Tester a preview
+        # of the ingested material and ask whether they want to add more or
+        # start the review.
+        self.storage.update_session(session.id, stage=Stage.AWAITING_MATERIAL_CONFIRM)
+        await self._send_material_confirm_dm(session)
+
+    async def _send_material_confirm_dm(self, session: Session) -> None:
+        """v3.2 Phase A: show what we read + invite supplement / confirm start."""
+        normalized_path = resolve_session_path(
+            self.cfg.paths.fs, session.requester_oid, session.id, "normalized.md",
+            must_exist=False,
+        )
+        if normalized_path.exists():
+            body = normalized_path.read_text(encoding="utf-8").strip()
+            preview = body[:240] + ("…" if len(body) > 240 else "")
+            char_count = len(body)
+        else:
+            preview = "(空)"
+            char_count = 0
+        await self._safe_dm(
+            session.requester_oid,
+            f"📥 我读到了（{char_count} 字符）：\n"
+            f"\n"
+            f"```\n{preview}\n```\n"
+            f"\n"
+            f"还有要补充的吗？\n"
+            f"  · 直接发新的文字 / 链接 / 文件 → 我会接着读进来\n"
+            f"  · `ok` / `开始` / `done` → 材料齐了，启动 review\n"
+            f"  · `cancel` → 取消这次 review",
+        )
+
+    async def _handle_awaiting_material_confirm(
+        self, user: User, session: Session, msg: IncomingMessage,
+    ) -> None:
+        """v3.2 Phase A: route reply at AWAITING_MATERIAL_CONFIRM."""
+        text = (msg.content_text or "").strip()
+        low = text.lower()
+
+        # cancel intent
+        if low in ("cancel", "取消", "算了", "stop"):
+            self.storage.update_session(
+                session.id, status=SessionStatus.CANCELLED,
+                stage=Stage.CANCELLED, closed_at=now_iso(),
+            )
+            await self._safe_dm(user.open_id, "好的，已取消。下次再来。")
+            return
+
+        # confirm-to-start intent
+        START_TOKENS = {"ok", "开始", "好", "go", "start", "done", "yes", "y", "👍", "ready"}
+        if low in START_TOKENS or low.startswith(("ok ", "好 ", "start ")):
+            await self._safe_dm(user.open_id, "✅ 收到，启动 review。给你看几个候选主题…")
+            self.storage.update_session(session.id, stage=Stage.SUBJECT_CONFIRMATION)
+            await self._do_confirm_topic(session.id)
+            return
+
+        # otherwise: treat as supplementary material
+        added = await self._append_supplementary_material(user, session, msg)
+        if not added:
+            await self._safe_dm(
+                user.open_id,
+                "我没听明白。回 `ok` 启动 review；发新材料追加到现有内容；`cancel` 取消。",
+            )
+            return
+        await self._send_material_confirm_dm(session)  # re-show preview with new content
+
+    async def _append_supplementary_material(
+        self, user: User, session: Session, msg: IncomingMessage,
+    ) -> bool:
+        """Append new material to normalized.md. Returns True if anything added.
+
+        Used by AWAITING_MATERIAL_CONFIRM (pre-review supplement, just append)
+        and QA_ACTIVE (mid-review supplement, append + rescan)."""
+        text = (msg.content_text or "").strip()
+        if not text and not msg.file_key:
+            return False
+
+        # download attachments to input/ + ingest separately
+        if msg.msg_type in ("image", "file", "audio") and msg.file_key:
+            try:
+                # reuse the multimodal pipeline for the new attachment
+                kind = "image" if msg.msg_type == "image" else (
+                    "audio" if msg.msg_type == "audio" else "file"
+                )
+                raw, _, _ = await self.lark.download_attachment(
+                    msg.message_id, msg.file_key, kind=kind,
+                )
+                from ..util.file_magic import (
+                    detect_audio_ext as _aud, detect_image_ext as _img, detect_file_ext as _file,
+                )
+                ext_fn = {"image": _img, "audio": _aud, "file": _file}[kind]
+                ext = ext_fn(raw) if raw else ".bin"
+                if ext == ".bin":
+                    ext = {"image": ".png", "audio": ".ogg", "file": ".bin"}[kind]
+                iso = now_iso().replace(":", "")
+                p = resolve_session_path(
+                    self.cfg.paths.fs, user.open_id, session.id,
+                    f"input/{iso}_supplement{ext}",
+                )
+                p.write_bytes(raw)
+                # ingest this single file → its normalized text appended to main
+                from ..pipeline.ingest_backends.base import IngestRejected as _IR
+                try:
+                    result = await self.ingest.run(session, p.name)
+                    appended_text = ""
+                    # ingest.run wrote to normalized.md; we want to APPEND not REPLACE
+                    # so re-read what it wrote and merge instead.
+                    norm = resolve_session_path(
+                        self.cfg.paths.fs, user.open_id, session.id, "normalized.md",
+                    )
+                    appended_text = norm.read_text(encoding="utf-8") if norm.exists() else ""
+                    # ingest.run will have OVERWRITTEN normalized; merge with prior
+                    return self._do_append_to_normalized(session, appended_text, replace=False)
+                except _IR as e:
+                    await self._safe_dm(user.open_id, e.user_message)
+                    return False
+            except Exception as e:
+                _logger.warning("supplement attachment failed: %s", e)
+                return False
+
+        # text-like
+        lark_urls = extract_lark_urls(text)
+        web_urls = _extract_urls_simple(text)
+        if lark_urls:
+            ld = LarkDocIngestBackend(self.lark)
+            result = await ld.fetch_lark_urls(lark_urls)
+            return self._do_append_to_normalized(session, result.normalized, replace=False)
+        if web_urls:
+            ws = WebScrapBackend()
+            result = await ws.scrape_urls(web_urls)
+            return self._do_append_to_normalized(session, result.normalized, replace=False)
+        # plain text — only treat as supplement if non-trivial
+        if len(text) >= 10:
+            return self._do_append_to_normalized(session, text, replace=False)
+        return False
+
+    def _do_append_to_normalized(
+        self, session: Session, new_block: str, *, replace: bool,
+    ) -> bool:
+        """Append (or replace) `new_block` in the session's normalized.md."""
+        if not new_block or not new_block.strip():
+            return False
+        normalized_path = resolve_session_path(
+            self.cfg.paths.fs, session.requester_oid, session.id, "normalized.md",
+        )
+        if replace or not normalized_path.exists():
+            atomic_write(normalized_path, new_block)
+            return True
+        existing = normalized_path.read_text(encoding="utf-8")
+        # avoid duplicating exact same block (idempotent)
+        if new_block.strip() in existing:
+            return False
+        merged = existing.rstrip() + "\n\n---\n\n[补充材料]\n\n" + new_block
+        atomic_write(normalized_path, merged)
+        return True
 
     async def _save_and_ingest_multimodal(
         self, user: User, session: Session, msg: IncomingMessage,
@@ -440,6 +592,11 @@ class Dispatcher:
     async def _handle_requester_in_session(
         self, user: User, session: Session, msg: IncomingMessage
     ) -> None:
+        # v3.2 Phase A: AWAITING_MATERIAL_CONFIRM is its own stage
+        if session.stage == Stage.AWAITING_MATERIAL_CONFIRM:
+            await self._handle_awaiting_material_confirm(user, session, msg)
+            return
+
         if session.stage == Stage.SUBJECT_CONFIRMATION:
             # Issue #9: if Tester replies with new material (URL or long text)
             # instead of a/b/c/custom-short-subject, re-ingest from that material
@@ -460,6 +617,11 @@ class Dispatcher:
 
         if session.stage in (Stage.QA_ACTIVE, Stage.QA_ACTIVE_REOPENED):
             self.storage.update_session(session.id, stage=Stage.QA_ACTIVE)
+            # v3.2 Phase B: detect supplementary material mid-Q&A.
+            # If Tester sends URL / file / long text instead of a/b/c reply,
+            # append + rescan + restart Q&A on the merged material.
+            if await self._maybe_supplement_during_qa(user, session, msg):
+                return
             outcome = qa_loop.handle_reply(
                 storage=self.storage, session=session, reply=msg.content_text,
                 top_n_more=self.cfg.review.top_n_findings,
@@ -516,6 +678,57 @@ class Dispatcher:
     async def _do_final_gate_default(self, session_id: str) -> None:
         """Wrapper for BUSY_STAGES (final_gate needs forced kwarg)."""
         await self._do_final_gate(session_id, forced=False)
+
+    async def _maybe_supplement_during_qa(
+        self, user: User, session: Session, msg: IncomingMessage,
+    ) -> bool:
+        """v3.2 Phase B: detect new material sent during Q&A.
+
+        Triggers iff the message looks like material (attachment, URL, or
+        long text >300 chars), NOT a normal a/b/c/pass/more/done reply. If
+        triggered, append to normalized.md, reset cursor, and re-scan from
+        scratch with the merged content.
+        """
+        # attachments are unambiguously material
+        if msg.msg_type in ("image", "file", "audio") and msg.file_key:
+            added = await self._append_supplementary_material(user, session, msg)
+            if added:
+                await self._kickoff_rescan_after_supplement(user, session)
+            return added
+
+        text = (msg.content_text or "").strip()
+        if not text:
+            return False
+
+        lark_urls = extract_lark_urls(text)
+        web_urls = _extract_urls_simple(text)
+        is_long = len(text) > 300
+
+        if not (lark_urls or web_urls or is_long):
+            # short text reply — let qa_loop interpret as a/b/c/custom
+            return False
+
+        added = await self._append_supplementary_material(user, session, msg)
+        if added:
+            await self._kickoff_rescan_after_supplement(user, session)
+        return added
+
+    async def _kickoff_rescan_after_supplement(
+        self, user: User, session: Session,
+    ) -> None:
+        """After appending supplementary material mid-Q&A: reset cursor +
+        bump round_no + re-scan from scratch."""
+        from .models import Cursor
+        self.storage.save_cursor(session, Cursor())
+        self.storage.update_session(
+            session.id, stage=Stage.SCANNING, round_no=session.round_no + 1,
+        )
+        await self._safe_dm(
+            user.open_id,
+            "📥 收到补充材料，已合并进 review。我重新扫一下（30-60 秒），"
+            "新一批 finding 出来再继续 Q&A…",
+        )
+        await self._do_scan(session.id)
 
     async def _handle_close_confirmation(
         self, user: User, session: Session, msg: IncomingMessage

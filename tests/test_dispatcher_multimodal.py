@@ -63,6 +63,7 @@ def _msg(*, msg_type: str, text: str = "", file_key: str = "",
 
 @pytest.mark.asyncio
 async def test_text_no_url_creates_session(tmp_storage):
+    """v3.2 Phase A: ingest goes through AWAITING_MATERIAL_CONFIRM gate first."""
     _seed_users(tmp_storage)
     dispatcher, lark = _build(tmp_storage)
     await dispatcher._handle_incoming(_msg(
@@ -70,8 +71,11 @@ async def test_text_no_url_creates_session(tmp_storage):
     ))
     s = tmp_storage.list_sessions(requester_oid="ou_r")[0]
     assert s.status == SessionStatus.ACTIVE
-    assert s.stage == Stage.SUBJECT_CONFIRMATION
+    assert s.stage == Stage.AWAITING_MATERIAL_CONFIRM
     assert (Path(s.fs_path) / "normalized.md").exists()
+    sent = [c.args[1] for c in lark.send_dm_text.call_args_list]
+    assert any("我读到了" in t or "材料" in t for t in sent), \
+        f"expected material-confirm DM; got: {sent}"
 
 
 @pytest.mark.asyncio
@@ -124,7 +128,8 @@ async def test_post_msg_treated_as_text(tmp_storage):
         text="提案 v1\n要不要给客户提供退款保障？\n预计成本：每月 5 万",
     ))
     s = tmp_storage.list_sessions(requester_oid="ou_r")[0]
-    assert s.stage == Stage.SUBJECT_CONFIRMATION
+    # v3.2 Phase A: ingest stops at AWAITING_MATERIAL_CONFIRM, not SUBJECT_CONFIRMATION
+    assert s.stage == Stage.AWAITING_MATERIAL_CONFIRM
 
 
 @pytest.mark.asyncio

@@ -32,6 +32,7 @@ class FindingStatus(StrEnum):
 
 class Stage(StrEnum):
     INTAKE = "intake"
+    AWAITING_MATERIAL_CONFIRM = "awaiting_material_confirm"  # v3.2: pre-review gate
     SUBJECT_CONFIRMATION = "subject_confirmation"
     SCANNING = "scanning"
     QA_ACTIVE = "qa_active"
