@@ -65,7 +65,7 @@ class LarkClient:
         "style":["bold"]}). See https://open.feishu.cn/document/server-docs/im-v1/message-content-description/create_json
         """
         content = json.dumps(
-            {"post": {"zh_cn": {"title": title, "content": post_paragraphs}}},
+            {"zh_cn": {"title": title, "content": post_paragraphs}},
             ensure_ascii=False,
         )
         body = {"receive_id": open_id, "msg_type": "post", "content": content}
