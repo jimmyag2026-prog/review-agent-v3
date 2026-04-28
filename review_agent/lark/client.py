@@ -179,6 +179,167 @@ class LarkClient:
         return doc
 
 
+    # ── Bitable API (Phase 2 — structured input/output) ────────────
+
+    async def get_bitable_records(
+        self, app_token: str, table_id: str,
+        *, page_size: int = 500, page_token: str | None = None,
+        user_id_type: str = "open_id",
+    ) -> dict:
+        """Fetch records from a Lark Bitable table.
+
+        https://open.feishu.cn/document/server-docs/docs/bitable-v1/app-table-record/list
+        Returns the full API response dict (data.records / page_token / total).
+        """
+        params: dict = {"page_size": page_size, "user_id_type": user_id_type}
+        if page_token:
+            params["page_token"] = page_token
+        out = await self._get(
+            f"/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records",
+            params=params,
+        )
+        return out.get("data", {})
+
+    async def search_bitable_records(
+        self, app_token: str, table_id: str,
+        field_name: str, operator: str, value: list[str],
+        *, page_size: int = 500, page_token: str | None = None,
+    ) -> dict:
+        """Search records in a Bitable table by field condition.
+
+        https://open.feishu.cn/document/server-docs/docs/bitable-v1/app-table-record/search
+        operator: "is" | "isNot" | "contains" | "doesNotContain" | "isEmpty" | "isNotEmpty"
+        """
+        payload: dict = {
+            "field_names": [],
+            "filter": {
+                "conjunction": "and",
+                "conditions": [{
+                    "field_name": field_name,
+                    "operator": operator,
+                    "value": value,
+                }],
+            },
+            "page_size": page_size,
+            "automatic_fields": True,
+        }
+        if page_token:
+            payload["page_token"] = page_token
+        out = await self._post(
+            f"/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/search",
+            payload,
+        )
+        return out.get("data", {})
+
+    async def create_bitable_record(
+        self, app_token: str, table_id: str,
+        fields: dict, *, user_id_type: str = "open_id",
+    ) -> dict | None:
+        """Create a record in a Bitable table.
+
+        fields must match the table schema (field_name → value).
+        Returns the created record dict, or None on failure.
+        https://open.feishu.cn/document/server-docs/docs/bitable-v1/app-table-record/create
+        """
+        payload = {"fields": fields}
+        out = await self._post(
+            f"/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records"
+            f"?user_id_type={user_id_type}",
+            payload,
+        )
+        return out.get("data", {}).get("record")
+
+    async def list_bitable_tables(
+        self, app_token: str, *, page_size: int = 50,
+    ) -> list[dict]:
+        """List all tables in a Bitable app.
+
+        https://open.feishu.cn/document/server-docs/docs/bitable-v1/app-table/list
+        Returns list of table dicts with id/name/type/properties/description.
+        """
+        out = await self._get(
+            f"/open-apis/bitable/v1/apps/{app_token}/tables",
+            params={"page_size": page_size},
+        )
+        return out.get("data", {}).get("items", [])
+
+    async def get_bitable_fields(
+        self, app_token: str, table_id: str, *,
+        page_size: int = 100,
+    ) -> list[dict]:
+        """List all fields in a Bitable table (schema metadata).
+
+        https://open.feishu.cn/document/server-docs/docs/bitable-v1/app-table-field/list
+        Returns list of field dicts with field_id/field_name/type/property.
+        """
+        out = await self._get(
+            f"/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/fields",
+            params={"page_size": page_size},
+        )
+        return out.get("data", {}).get("items", [])
+
+    # ── Lark Sheet API (basic read) ────────────────────────────────
+
+    async def get_sheet_meta(self, spreadsheet_token: str) -> dict:
+        """Get sheet metadata (title, sheet count, etc.).
+
+        https://open.feishu.cn/document/server-docs/docs/sheets-v3/spreadsheet-spreadsheet/get_meta
+        """
+        out = await self._get(
+            f"/open-apis/sheets/v3/spreadsheets/{spreadsheet_token}/sheets_meta",
+        )
+        return out.get("data", {})
+
+    async def get_sheet_values(
+        self, spreadsheet_token: str, sheet_range: str,
+    ) -> list[list[str]]:
+        """Read cell values from a sheet range.
+
+        sheet_range format: "<sheet_id>!A1:Z100"
+        Returns list of rows, each row is a list of cell values (all strings).
+        https://open.feishu.cn/document/server-docs/docs/sheets-v3/data-operation/reading-a-single-range
+        """
+        import json
+        out = await self._get(
+            f"/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values/{sheet_range}",
+        )
+        value_range = out.get("data", {}).get("valueRange", {})
+        return value_range.get("values", [])
+
+    # ── YouTube transcript extraction ──────────────────────────────
+
+    async def extract_youtube_transcript(self, video_id: str) -> str | None:
+        """Extract transcript from a YouTube video using youtube-transcript-api.
+
+        Returns the full transcript text, or None on failure.
+        Requires `pip install youtube-transcript-api` or falls back to fetching
+        via httpx (auto-captions on the page).
+        """
+        try:
+            from youtube_transcript_api import YouTubeTranscriptApi  # type: ignore  # noqa: F811
+            transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=["zh", "en"])
+            if transcript:
+                return " ".join(seg["text"] for seg in transcript)
+        except ImportError:
+            pass
+        except Exception:
+            pass
+
+        # Fallback: fetch page and extract auto-captions
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(
+                    f"https://youtubetranscript.com/?v={video_id}",
+                    headers={"User-Agent": "review-agent/3.1"},
+                )
+                if resp.status_code == 200:
+                    return resp.text
+        except Exception:
+            pass
+        return None
+
+
 def _mime_for_kind(kind: str) -> str:
     """Map Lark attachment 'kind' to a MIME type for file extension guessing."""
     return {

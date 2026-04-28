@@ -34,9 +34,15 @@ from ..pipeline.ingest import IngestPipeline
 from ..pipeline.ingest_backends import (
     IngestBackend,
     IngestRejected,
+    BitableBackend,
     LarkDocBackend as LarkDocIngestBackend,
+    SheetBackend,
     WebScrapBackend,
+    YouTubeBackend,
+    extract_bitable_urls,
     extract_lark_urls,
+    extract_sheet_urls,
+    extract_youtube_urls,
 )
 from ..util.file_magic import detect_audio_ext, detect_file_ext, detect_image_ext
 from ..util import log
@@ -243,7 +249,7 @@ class Dispatcher:
         # treat post (Lark rich text) like text — its content_text was extracted by the router
         text_like = msg.msg_type in ("text", "post") and msg.content_text.strip()
 
-        # ── 1+2+3 text-like: detect URLs first (Lark > web > plain) ──
+        # ── 1+2+3+4 text-like: detect URLs first (Lark > Bitable > Sheet > YouTube > web > plain) ──
         if text_like:
             lark_urls = extract_lark_urls(msg.content_text)
             if lark_urls:
@@ -254,6 +260,39 @@ class Dispatcher:
                 )
                 atomic_write(normalized_path, result.normalized)
                 _logger.info("lark_doc ingest: %s", result.note)
+                return True
+
+            bitable_urls = extract_bitable_urls(msg.content_text)
+            if bitable_urls:
+                bb = BitableBackend(self.lark)
+                result = await bb.fetch_bitable_urls(bitable_urls)
+                normalized_path = resolve_session_path(
+                    fs_root, user.open_id, session.id, "normalized.md",
+                )
+                atomic_write(normalized_path, result.normalized)
+                _logger.info("bitable ingest: %s", result.note)
+                return True
+
+            sheet_urls = extract_sheet_urls(msg.content_text)
+            if sheet_urls:
+                sb = SheetBackend(self.lark)
+                result = await sb.fetch_sheet_urls(sheet_urls)
+                normalized_path = resolve_session_path(
+                    fs_root, user.open_id, session.id, "normalized.md",
+                )
+                atomic_write(normalized_path, result.normalized)
+                _logger.info("sheet ingest: %s", result.note)
+                return True
+
+            yt_urls = extract_youtube_urls(msg.content_text)
+            if yt_urls:
+                yb = YouTubeBackend()
+                result = await yb.fetch_urls(yt_urls)
+                normalized_path = resolve_session_path(
+                    fs_root, user.open_id, session.id, "normalized.md",
+                )
+                atomic_write(normalized_path, result.normalized)
+                _logger.info("youtube ingest: %s", result.note)
                 return True
 
             web_urls = _extract_urls_simple(msg.content_text)
@@ -620,8 +659,25 @@ class Dispatcher:
         s = self.storage.get_session(session_id)
         assert s is not None
         if s.verdict == Verdict.FAIL and not forced:
-            if s.fail_count < self.cfg.review.final_gate_max_fail_count:
-                regressions = self._extract_open_blockers(s)
+            regressions = self._extract_open_blockers(s)
+            # Issue #8: if final_gate FAILs but there are no actionable open
+            # BLOCKERs to re-review, we have nothing to ask the Requester. Don't
+            # try to reopen Q&A (would deadlock at empty cursor) — escalate to
+            # FORCED_PARTIAL so the session can close cleanly with what we have.
+            if not regressions:
+                _logger.warning(
+                    "final_gate FAIL with no open BLOCKERs for %s — forcing PARTIAL",
+                    session_id,
+                )
+                self.storage.update_session(
+                    session_id, verdict=Verdict.FORCED_PARTIAL, stage=Stage.CLOSING,
+                )
+                await self._safe_dm(
+                    s.requester_oid,
+                    "终审认为材料还差点意思，但已经没具体可补的 BLOCKER 了。"
+                    "我先把已收的内容整理成 brief 发给你和 admin，他可以回头再追问。",
+                )
+            elif s.fail_count < self.cfg.review.final_gate_max_fail_count:
                 transition_after_final_gate_fail(
                     storage=self.storage, session=s,
                     regression_finding_ids=regressions,
@@ -636,6 +692,9 @@ class Dispatcher:
                 _logger.warning(
                     "final gate failed %d times for %s — forcing PARTIAL",
                     s.fail_count, session_id,
+                )
+                self.storage.update_session(
+                    session_id, verdict=Verdict.FORCED_PARTIAL,
                 )
         self.storage.update_session(session_id, stage=Stage.CLOSING)
         await self._do_build_and_deliver(session_id)
