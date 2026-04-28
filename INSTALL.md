@@ -227,6 +227,64 @@ into `secrets.env`, which overrides the value in `config.toml`.
 To revert to defaults: open `secrets.env` and delete the
 `REVIEW_AGENT_MODEL=` / `REVIEW_AGENT_FAST_MODEL=` line.
 
+### B.6.3  Multimodal (image OCR / voice / Lark Doc URL / web URL)
+
+Since v3.1, requesters can send any of these and the bot will use them as
+review material:
+
+| Sent | Default behavior | How it works |
+|---|---|---|
+| Text | Direct ingest | Always works |
+| Lark Doc URL (`https://*.feishu.cn/docx/*`) | Fetch via Lark Open API | Always works (uses bot's existing Lark token) |
+| Lark Wiki URL | Fetch via Lark Open API | Always works |
+| Other URL (blog/Notion/etc.) | Scrape readable body | Always works (pure-Python `[multimodal]` deps) |
+| PDF | Extract text via pdfminer | Always works (`[multimodal]` deps include pdfminer.six) |
+| Lark `post` (rich text) | Extract plain text | Always works |
+| Image (PNG/JPG/etc.) | OCR | needs **either** local tesseract **or** OpenAI Vision API |
+| Voice / audio | Transcribe | needs **either** local whisper.cpp **or** OpenAI Whisper API |
+| Video / sticker / card / share | Polite refuse with explanation | n/a |
+
+**Choose one of two paths** for image OCR + voice transcription:
+
+#### Path A — API fallback (zero local install, pay per use)
+
+Add an OpenAI key to `~/.config/review-agent/secrets.env`:
+
+```
+OPENAI_API_KEY=sk-proj-...
+```
+
+Then `systemctl --user restart review-agent`. Image and audio will be
+processed by GPT-4o-mini Vision + Whisper-1 API respectively. Cost is
+~$0.001 / image, ~$0.006 / audio minute.
+
+#### Path B — Local install (one-click, no API costs)
+
+```bash
+ssh reviewer@159.65.75.97
+~/code/review-agent/.venv/bin/review-agent install-multimodal
+```
+
+Auto-detects OS (apt / brew / dnf / pacman) and installs:
+- `tesseract` + `tesseract-ocr-chi-sim` (Chinese OCR)
+- `whisper.cpp` + base model (speech-to-text)
+
+Once installed, `systemctl --user restart review-agent`. Image and audio
+are now processed locally — no OpenAI key needed, no per-call cost.
+
+**Path A vs Path B**: A is simpler for low volume; B saves cost at scale.
+You can also do **both** — local binaries run by default; OpenAI API is the
+fallback if local fails for any reason. Just set both `OPENAI_API_KEY` and
+run `install-multimodal`.
+
+#### Verify
+
+```bash
+~/code/review-agent/.venv/bin/review-agent doctor
+# under "llm": confirms model + key
+# under tesseract / whisper hints: surfaces which fallback path is live
+```
+
 ### B.7  First end-to-end review
 
 DM the bot a draft (text or PDF). The flow:

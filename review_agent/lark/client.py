@@ -60,9 +60,16 @@ class LarkClient:
 
     async def send_dm_post(self, open_id: str, post_paragraphs: list[list[dict]],
                            *, title: str = "") -> str:
-        """Send a Lark `post` (rich text) DM. `post_paragraphs` is a list of paragraphs,
-        each paragraph being a list of element dicts (e.g. {"tag":"text","text":"...",
-        "style":["bold"]}). See https://open.feishu.cn/document/server-docs/im-v1/message-content-description/create_json
+        """Send a Lark `post` (rich text) DM.
+
+        Wire format (per Lark im/v1/messages spec):
+            content = JSON-encoded {"zh_cn": {"title": "...", "content": [[...]]}}
+            msg_type = "post"
+        DO NOT wrap content in {"post": {...}} — Lark returns 230001
+        invalid-message-content if you do, and the rich-text DM is dropped
+        (dispatcher then falls back to plain text, hiding the bug).
+
+        See https://open.feishu.cn/document/server-docs/im-v1/message-content-description/create_json
         """
         content = json.dumps(
             {"zh_cn": {"title": title, "content": post_paragraphs}},

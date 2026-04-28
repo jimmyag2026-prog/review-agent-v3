@@ -1,5 +1,110 @@
 # Changelog
 
+## [3.1.0] — 2026-04-28 (multimodal coverage + one-click local install)
+
+Adds first-class support for every Lark message type a Requester might send.
+Previously only text + PDF worked end-to-end; images / voice / Lark Doc URLs
+either silently dropped or hit broken handlers. v3.1 makes the coverage
+**complete** (no Requester message gets ignored) and gives admin **two equally
+viable install paths** depending on whether they want zero-config (API) or
+zero-cost (local binaries).
+
+### 🟢 Coverage matrix (every Lark msg_type → defined behavior)
+
+| Sent by Requester | v3.0.x | v3.1 |
+|---|---|---|
+| Text | ingest ✓ | ingest ✓ |
+| Text + URL (any) | ingest as text (URL not followed) | URLs auto-detected → fetched as material ✨ |
+| Text + Lark Doc URL | ingest as text | fetched via Lark Open API ✨ |
+| Lark `post` (rich text) | dropped silently | text extracted from element tree ✨ |
+| PDF file | ingest ✓ | ingest ✓ |
+| Image | crashed (`.jpg` ext mismatch) | OCR via tesseract or OpenAI Vision API ✨ |
+| Voice / audio | crashed (whisper output bug) | transcribe via whisper.cpp or OpenAI Whisper API ✨ |
+| Other file (xlsx etc.) | crashed | friendly refuse DM ✨ |
+| Video / sticker / card / share | dropped silently | friendly refuse DM ✨ |
+
+### 🟢 Two install paths for image/voice (admin chooses)
+
+```bash
+# Path A — zero local install, pay-per-use OpenAI fallback
+echo "OPENAI_API_KEY=sk-..." >> ~/.config/review-agent/secrets.env
+systemctl --user restart review-agent
+
+# Path B — one-click local binaries (no API cost)
+review-agent install-multimodal           # apt/brew install tesseract + whisper.cpp
+systemctl --user restart review-agent
+```
+
+`install-multimodal` auto-detects OS (apt / brew / dnf / pacman) and installs
+the right packages with the Chinese OCR language pack. `--tesseract-only` for
+just OCR; `--dry-run` to preview.
+
+### 🔴 Bug fixes (v3.0.x multimodal scaffolding had 8 known bugs)
+
+- **B1+B2 · URL flow dead-loop**: dispatcher's URL-detection branch was
+  unreachable behind the plain-text branch; URLs were never followed. Fixed
+  by reordering: Lark Doc URL → other URL → plain text.
+- **B3 · whisper.cpp output**: `--output-txt` writes to a file, not stdout —
+  reading stdout returned progress logs as the "transcription". Switched to
+  `-nt` (no timestamps) + stdout proper.
+- **B4 · image extension mismatch**: all images saved as `.jpg` regardless
+  of actual format; magic-bytes detection added (`util/file_magic.py`).
+- **B5 · async safety**: `whisper.load_model()` is blocking and was awaited
+  inside an async function; wrapped with `asyncio.to_thread`.
+- **B6 · whisper language hardcoded `zh`**: switched to auto-detect.
+- **B7 · web_scrape bs4 ImportError**: `from bs4` was outside try/except;
+  raised on systems without bs4 installed.
+- **B8 · IngestRejected swallowed as fail**: dispatcher's blanket
+  `except Exception` triggered `_fail_session` for every error including
+  `IngestRejected` (which carries a friendly user message). Now split: 
+  IngestRejected → friendly DM + cancel session; other Exception → fail.
+- **+ subject_too_long fix from v3.0.1 carried forward**
+
+### 🟢 New backends + helpers
+
+- `pipeline/ingest_backends/lark_doc.py` — `LarkDocBackend` fetches Lark Doc
+  / Wiki content via the bot's existing tenant_access_token. Pure async, no
+  scraping, no extra OAuth.
+- `pipeline/ingest_backends/web_scrape.py` — `WebScrapBackend.scrape_urls()`
+  callable directly by dispatcher (not via mime/ext routing).
+- `util/file_magic.py` — `detect_image_ext` / `detect_audio_ext` /
+  `detect_file_ext` from raw bytes.
+- `routers/lark_webhook.py::_extract_post_text` — walks Lark `post` element
+  tree to plain text.
+- 7 new catch-all polite-refuse messages for video / sticker / interactive /
+  share_chat / share_user / system / unknown.
+
+### 🛠 New CLI
+
+- `review-agent install-multimodal [--tesseract-only] [--dry-run]` — calls
+  the bundled `deploy/install-multimodal.sh`.
+
+### 🛠 Operational
+
+- `pyproject.toml` extras renamed: `[ingest]` → `[multimodal]` (alias kept).
+- `secrets.env.example` adds `OPENAI_API_KEY=` slot with explanation.
+- `install-user.sh` accepts `--multimodal-local` (also installs binaries) and
+  `--no-multimodal` (text+PDF only).
+
+### Test count: 101 → 138 ✅
+
+37 new tests covering: file magic detection (15), LarkDocBackend (10),
+dispatcher routing for every msg_type (12).
+
+### Migration from v3.0.x
+
+```bash
+ssh reviewer@159.65.75.97
+cd ~/code/review-agent
+git pull
+.venv/bin/pip install -e ".[multimodal]" --upgrade
+systemctl --user restart review-agent
+.venv/bin/review-agent doctor
+```
+
+Optional: `review-agent install-multimodal` if you want OCR + voice locally
+instead of OpenAI API.
+
 ## [3.0.1] — 2026-04-28 (live-test bug fixes)
 
 Series of fixes from the first multi-user end-to-end live test on the VPS

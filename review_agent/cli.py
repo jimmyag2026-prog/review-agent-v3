@@ -47,6 +47,13 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("show-config", help="print effective config (paths, llm, review)")
 
+    im = sub.add_parser("install-multimodal",
+                         help="one-click install: tesseract OCR + whisper.cpp (apt/brew)")
+    im.add_argument("--tesseract-only", action="store_true",
+                    help="OCR only (skip whisper.cpp build)")
+    im.add_argument("--dry-run", action="store_true",
+                    help="print what would be installed, don't actually install")
+
     args = p.parse_args(argv)
     # Load secrets.env into os.environ so CLI sees the same tunables (REVIEW_AGENT_MODEL etc.)
     # that the systemd service loads via EnvironmentFile=.
@@ -161,6 +168,28 @@ def main(argv: list[str] | None = None) -> int:
         print(f"       systemctl --user restart review-agent")
         print(f"       (or: sudo systemctl restart review-agent)")
         return 0
+
+    if args.cmd == "install-multimodal":
+        import os
+        import subprocess
+        # find install-multimodal.sh next to the installed package or in repo
+        here = Path(__file__).resolve().parent.parent  # review_agent/..
+        candidates = [
+            here / "deploy" / "install-multimodal.sh",
+            Path("/opt/review-agent/deploy/install-multimodal.sh"),
+            Path(os.path.expanduser("~/code/review-agent/deploy/install-multimodal.sh")),
+        ]
+        script = next((p for p in candidates if p.exists()), None)
+        if not script:
+            print("error: install-multimodal.sh not found in any of:", *candidates, sep="\n  ")
+            return 2
+        cmd = ["bash", str(script)]
+        if args.tesseract_only:
+            cmd.append("--tesseract-only")
+        if args.dry_run:
+            cmd.append("--dry-run")
+        print(f"running: {' '.join(cmd)}")
+        return subprocess.call(cmd)
 
     if args.cmd == "migrate":
         print("schema applied")

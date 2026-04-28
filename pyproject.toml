@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "review-agent"
-version = "3.0.0"
+version = "3.1.0"
 description = "Async pre-meeting CSW-style review coach for Lark"
 license = {text = "MIT"}
 requires-python = ">=3.11"
@@ -30,15 +30,27 @@ dev = [
     "ruff>=0.3",
     "mypy>=1.8",
 ]
+# default multimodal: pure-Python deps. tesseract / whisper.cpp are optional
+# system binaries — install via `bash deploy/install-multimodal.sh` (one-click).
+multimodal = [
+    "pdfminer.six>=20231228",      # PDF text extraction
+    "readability-lxml>=0.8",       # web article body extraction
+    "beautifulsoup4>=4.12",        # web fallback parser
+    "lxml>=5",                     # parser backend
+    "markdownify>=0.12",           # html → markdown
+]
+# back-compat alias for v3.0.x install scripts
 ingest = [
     "pdfminer.six>=20231228",
-    "pytesseract>=0.3",
-    "Pillow>=10",
-    "openai>=1.0",
     "readability-lxml>=0.8",
     "beautifulsoup4>=4.12",
     "lxml>=5",
     "markdownify>=0.12",
+]
+# heaviest install (~1.5GB w/ torch) — only if you want Python-side whisper
+# instead of whisper.cpp + OpenAI Whisper API.
+multimodal-local-whisper = [
+    "openai-whisper>=20231117",
 ]
 
 [project.scripts]

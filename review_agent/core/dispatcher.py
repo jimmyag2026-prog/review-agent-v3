@@ -31,7 +31,14 @@ from ..pipeline.delivery_backends import (
     LocalArchiveBackend,
 )
 from ..pipeline.ingest import IngestPipeline
-from ..pipeline.ingest_backends import IngestBackend
+from ..pipeline.ingest_backends import (
+    IngestBackend,
+    IngestRejected,
+    LarkDocBackend as LarkDocIngestBackend,
+    WebScrapBackend,
+    extract_lark_urls,
+)
+from ..util.file_magic import detect_audio_ext, detect_file_ext, detect_image_ext
 from ..util import log
 from ..util.ids import now_iso
 from ..util.path import atomic_write, resolve_session_path
@@ -187,102 +194,146 @@ class Dispatcher:
             responder_profile=responder_profile,
         )
 
-        # ── Phase 8: multimodal dispatch ───────────────────
+        # ── multimodal dispatch (v3.1: split IngestRejected vs real failure) ──
         try:
-            path = await self._save_and_ingest_multimodal(user, session, msg)
+            ingested = await self._save_and_ingest_multimodal(user, session, msg)
+        except IngestRejected as e:
+            # friendly user-facing failure (B8 fix); cancel the session so it
+            # doesn't sit at INTAKE forever, but DON'T mark it `failed` either
+            await self._safe_dm(user.open_id, e.user_message)
+            self.storage.update_session(
+                session.id, status=SessionStatus.CANCELLED, stage=Stage.INGEST_FAILED,
+                closed_at=now_iso(),
+            )
+            return
         except Exception as e:
             await self._fail_session(session, Stage.INGEST_FAILED, "ingest", e)
             return
-        if path is None:
-            return  # already sent a DM (unsupported / too large / etc.)
+
+        if not ingested:
+            # _save_and_ingest_multimodal already sent a polite refuse DM
+            self.storage.update_session(
+                session.id, status=SessionStatus.CANCELLED, stage=Stage.INGEST_FAILED,
+                closed_at=now_iso(),
+            )
+            return
 
         self.storage.update_session(session.id, stage=Stage.SUBJECT_CONFIRMATION)
         await self._do_confirm_topic(session.id)
 
     async def _save_and_ingest_multimodal(
         self, user: User, session: Session, msg: IncomingMessage,
-    ) -> Path | None:
-        """Download, save, and ingest a message. Returns the saved file path
-        on success, None if we sent a DM and the caller should stop."""
+    ) -> bool:
+        """Route the inbound message to the right ingest path. Returns True if
+        we ingested into normalized.md, False if we sent a polite refuse DM and
+        the caller should cancel the session.
+
+        v3.1 routing order:
+        1. text/post containing Lark Doc/Wiki URL  → LarkDocBackend (via Open API)
+        2. text/post containing other URL          → WebScrapBackend (httpx)
+        3. text/post plain                          → save as md → IngestPipeline (TextBackend)
+        4. image                                    → download + magic-bytes ext → ImageBackend
+        5. audio                                    → download + magic-bytes ext → AudioBackend
+        6. file                                     → download + magic-bytes ext → IngestPipeline (PdfBackend / friendly refuse)
+        7. video / sticker / interactive / share_*  → polite refuse DM
+        """
         fs_root = self.cfg.paths.fs
         iso = now_iso().replace(":", "")
 
-        # ── Text message (existing path, unchanged) ──
-        if msg.msg_type == "text" and msg.content_text.strip():
+        # treat post (Lark rich text) like text — its content_text was extracted by the router
+        text_like = msg.msg_type in ("text", "post") and msg.content_text.strip()
+
+        # ── 1+2+3 text-like: detect URLs first (Lark > web > plain) ──
+        if text_like:
+            lark_urls = extract_lark_urls(msg.content_text)
+            if lark_urls:
+                ld = LarkDocIngestBackend(self.lark)
+                result = await ld.fetch_lark_urls(lark_urls)
+                normalized_path = resolve_session_path(
+                    fs_root, user.open_id, session.id, "normalized.md",
+                )
+                atomic_write(normalized_path, result.normalized)
+                _logger.info("lark_doc ingest: %s", result.note)
+                return True
+
+            web_urls = _extract_urls_simple(msg.content_text)
+            if web_urls:
+                ws = WebScrapBackend()
+                result = await ws.scrape_urls(web_urls)
+                normalized_path = resolve_session_path(
+                    fs_root, user.open_id, session.id, "normalized.md",
+                )
+                atomic_write(normalized_path, result.normalized)
+                _logger.info("web_scrape ingest: %s", result.note)
+                return True
+
+            # plain text
             text_path = resolve_session_path(
-                fs_root, user.open_id, session.id,
-                f"input/{iso}_text.md",
+                fs_root, user.open_id, session.id, f"input/{iso}_text.md",
             )
             atomic_write(text_path, msg.content_text)
             await self.ingest.run(session, text_path.name)
-            return text_path
+            return True
 
-        # ── Image message ──
+        # ── 4 image ──
         if msg.msg_type == "image" and msg.file_key:
             raw, _, _ = await self.lark.download_attachment(
                 msg.message_id, msg.file_key, kind="image",
             )
+            ext = detect_image_ext(raw) if raw else ".bin"
+            if ext == ".bin":
+                ext = ".png"  # least-bad guess
             img_path = resolve_session_path(
-                fs_root, user.open_id, session.id,
-                f"input/{iso}_image.jpg",
+                fs_root, user.open_id, session.id, f"input/{iso}_image{ext}",
             )
             img_path.write_bytes(raw)
             await self.ingest.run(session, img_path.name)
-            return img_path
+            return True
 
-        # ── File message ──
+        # ── 5 audio ──
+        if msg.msg_type == "audio" and msg.file_key:
+            raw, _, _ = await self.lark.download_attachment(
+                msg.message_id, msg.file_key, kind="audio",
+            )
+            ext = detect_audio_ext(raw) if raw else ".bin"
+            if ext == ".bin":
+                ext = ".ogg"  # Lark voice notes are usually OGG/Opus
+            audio_path = resolve_session_path(
+                fs_root, user.open_id, session.id, f"input/{iso}_audio{ext}",
+            )
+            audio_path.write_bytes(raw)
+            await self.ingest.run(session, audio_path.name)
+            return True
+
+        # ── 6 file ──
         if msg.msg_type == "file" and msg.file_key:
             raw, _, _ = await self.lark.download_attachment(
                 msg.message_id, msg.file_key, kind="file",
             )
             ext = self._guess_ext_from_content_raw(msg.content_raw)
+            if ext in ("", ".bin"):
+                ext = detect_file_ext(raw) if raw else ".bin"
             file_path = resolve_session_path(
-                fs_root, user.open_id, session.id,
-                f"input/{iso}_file{ext}",
+                fs_root, user.open_id, session.id, f"input/{iso}_file{ext}",
             )
             file_path.write_bytes(raw)
-            await self.ingest.run(session, file_path.name)
-            return file_path
-
-        # ── Audio message ──
-        if msg.msg_type == "audio" and msg.file_key:
-            raw, _, _ = await self.lark.download_attachment(
-                msg.message_id, msg.file_key, kind="audio",
-            )
-            audio_path = resolve_session_path(
-                fs_root, user.open_id, session.id,
-                f"input/{iso}_audio.mp3",
-            )
-            audio_path.write_bytes(raw)
-            await self.ingest.run(session, audio_path.name)
-            return audio_path
-
-        # ── URL detection in text messages ──
-        if msg.msg_type == "text" and msg.content_text.strip():
-            urls = _extract_urls_simple(msg.content_text)
-            if urls:
-                url_path = resolve_session_path(
-                    fs_root, user.open_id, session.id,
-                    f"input/{iso}_urls.txt",
+            try:
+                await self.ingest.run(session, file_path.name)
+                return True
+            except Exception as e:
+                # friendly refuse for unsupported file types (xlsx/docx/etc.)
+                _logger.info("file ingest unsupported (%s): %s", ext, e)
+                await self._safe_dm(
+                    user.open_id,
+                    f"收到 *{ext or 'unknown'}* 文件，但我现在还不会处理这个格式 "
+                    "（PDF / 图片 / 文字都行）。能贴正文给我吗？",
                 )
-                atomic_write(url_path, "\n".join(urls))
-                try:
-                    await self.ingest.run(session, url_path.name)
-                except Exception:
-                    text_path = resolve_session_path(
-                        fs_root, user.open_id, session.id,
-                        f"input/{iso}_text.md",
-                    )
-                    atomic_write(text_path, msg.content_text)
-                    await self.ingest.run(session, text_path.name)
-                    return text_path
-                return url_path
+                return False
 
-        await self._safe_dm(
-            user.open_id,
-            "收到。这个类型我还不会处理（v0 还不支持图片/文件/语音），能直接贴正文给我吗？",
-        )
-        return None
+        # ── 7 catch-all: video / sticker / interactive / share_* / system ──
+        polite = _CATCH_ALL_DM.get(msg.msg_type, _CATCH_ALL_DM["_default"])
+        await self._safe_dm(user.open_id, polite)
+        return False
 
     @staticmethod
     def _guess_ext_from_content_raw(content_raw: str) -> str:
@@ -292,8 +343,8 @@ class Dispatcher:
             fname = parsed.get("file_name", "")
             if fname:
                 from pathlib import Path
-                return Path(fname).suffix
-        except (json.JSONDecodeError, Exception):
+                return Path(fname).suffix or ".bin"
+        except (json.JSONDecodeError, ValueError):
             pass
         return ".bin"
 
@@ -636,15 +687,32 @@ class Dispatcher:
         await self._safe_dm(session.requester_oid, message)
 
 
+_CATCH_ALL_DM = {
+    "media":       "收到视频 🎥 但我现在还不会处理视频。能把要让 admin 看的内容写成文字 / 截图 / 文档发我吗？",
+    "video":       "收到视频 🎥 但我现在还不会处理视频。能把要让 admin 看的内容写成文字 / 截图 / 文档发我吗？",
+    "sticker":     "看到表情啦 🐱 不过 review 需要点实质内容 — 把你想让 admin 拍板的事情发文字 / 文档给我吧。",
+    "interactive": "收到卡片，但 v0 我还不会读卡片内容。把要 review 的事情贴成文字给我吧。",
+    "share_chat":  "看到你分享了一个群，不过我得读到具体材料才能 review。直接发草稿 / 文档 / 链接给我吧。",
+    "share_user":  "看到你分享了一个用户名片，不过我得读到具体材料才能 review。直接发草稿 / 文档 / 链接给我吧。",
+    "system":      "（系统消息已忽略）",
+    "_default":    "收到，但这种消息类型我现在还不会处理。能直接贴文字 / 发文档 / 发图给我吗？",
+}
+
+
 def _extract_urls_simple(text: str) -> list[str]:
-    """Extract http/https URLs from text. Returns deduplicated list."""
+    """Extract http/https URLs from text. Returns deduplicated list, with
+    Lark URLs filtered out (those go to LarkDocBackend instead)."""
     import re
     urls = re.findall(r"https?://[^\s<>\"')\]]+", text)
     cleaned = [u.rstrip(".,;:!?）)") for u in urls]
     seen = set()
     result = []
     for u in cleaned:
-        if u not in seen:
-            seen.add(u)
-            result.append(u)
+        if u in seen:
+            continue
+        seen.add(u)
+        # filter out Lark URLs (handled by extract_lark_urls)
+        if re.match(r"https?://[^/]+\.(?:feishu\.cn|larksuite\.com)/(docx|docs|wiki)/", u):
+            continue
+        result.append(u)
     return result

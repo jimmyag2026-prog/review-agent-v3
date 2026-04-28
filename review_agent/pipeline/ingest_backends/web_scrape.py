@@ -1,34 +1,37 @@
+"""WebScrapBackend — fetch + clean a web page into markdown for review material.
+
+Called DIRECTLY by dispatcher when URLs are detected in a Requester message
+(NOT routed through IngestPipeline.can_handle, which is mime/ext based and
+URLs don't fit that model).
+"""
 from __future__ import annotations
 
-import asyncio
 import re
 from pathlib import Path
-from urllib.parse import urlparse
 
 from .base import IngestBackend, IngestRejected, IngestResult
 
 
 class WebScrapBackend(IngestBackend):
-    """Extract readable content from external web pages (Notion, Confluence, blogs, etc.)."""
-
     name = "web_scrape"
-    kind = "text"  # output is text, even though input is URL
+    kind = "text"
 
     def can_handle(self, mime: str, ext: str) -> bool:
-        # This backend is triggered by URL detection in the dispatcher,
-        # NOT by file mime/ext. But we still implement can_handle for
-        # completeness: if someone feeds a .url file we can process it.
+        # invoked directly by dispatcher; we still accept .url files defensively
         return ext.lower() == ".url" or mime == "text/x-uri"
 
     async def ingest(self, input_path: Path) -> IngestResult:
-        """Read URLs from input_path (one per line) and scrape each."""
+        """Rare path: input_path holds URLs one per line (.url file)."""
         raw = input_path.read_text(encoding="utf-8", errors="replace").strip()
         urls = _extract_urls(raw)
-
         if not urls:
-            raise IngestRejected(
-                "没有在内容里发现可用的 URL。请确认链接格式正确。"
-            )
+            raise IngestRejected("没在内容里找到 URL，请贴正文给我。")
+        return await self.scrape_urls(urls)
+
+    async def scrape_urls(self, urls: list[str]) -> IngestResult:
+        """Public API: dispatcher hands a list of URLs directly."""
+        if not urls:
+            raise IngestRejected("URL 列表是空的。")
 
         results: list[str] = []
         for url in urls:
@@ -36,43 +39,36 @@ class WebScrapBackend(IngestBackend):
                 text = await self._scrape_one(url)
                 if text:
                     results.append(f"## {url}\n\n{text}")
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 (per-URL failure tolerated)
                 results.append(f"## {url}\n\n> ⚠ 抓取失败: {e}")
 
         if not results or all("抓取失败" in r for r in results):
             raise IngestRejected(
-                "所有 URL 都无法抓取。可能被反爬、需要登录、或网络不通。"
+                "所有 URL 都抓不到内容（可能被反爬 / 需要登录 / 网络不通）。"
                 "请直接贴正文给我。"
             )
-
         combined = "\n\n---\n\n".join(results)
         return IngestResult(
             backend="web_scrape",
-            normalized=(
-                f"[🌐 已从 {len(urls)} 个网页抓取内容]\n\n"
-                f"{combined}"
-            ),
-            note=f"scraped {len(urls)} URLs, {len(combined)} total chars",
+            normalized=f"[🌐 已从 {len(urls)} 个网页抓取内容]\n\n{combined}",
+            note=f"scraped {len(urls)} URLs, {len(combined)} chars",
         )
 
     async def _scrape_one(self, url: str) -> str:
-        # Try readability-lxml (best for articles) → bs4 fallback
         import httpx
-
         headers = {
             "User-Agent": (
-                "review-agent/3.0 (bot; review purposes only; "
+                "review-agent/3.1 (bot; review purposes only; "
                 "contact admin for questions)"
             ),
         }
-
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as client:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True,
+                                       headers=headers) as client:
             resp = await client.get(url)
             resp.raise_for_status()
             html = resp.text
-            base_url = str(resp.url)  # final after redirects
 
-        # ── Primary: readability-lxml ──
+        # Try readability-lxml first
         try:
             from readability import Document  # type: ignore
             doc = Document(html)
@@ -84,15 +80,21 @@ class WebScrapBackend(IngestBackend):
         except ImportError:
             pass
 
-        # ── Fallback: bs4 body text extraction ──
-        from bs4 import BeautifulSoup
+        # Fallback: bs4 plain-text extraction (B7 fix: handle import error)
+        try:
+            from bs4 import BeautifulSoup  # type: ignore
+        except ImportError as e:
+            raise IngestRejected(
+                f"网页抓取依赖没装（{e}）。让 admin 跑 "
+                "`pip install -e \".[multimodal]\"` 装 readability-lxml + beautifulsoup4。"
+            ) from None
+
         soup = BeautifulSoup(html, "lxml")
         title = soup.title.string if soup.title else ""
         for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
             tag.decompose()
         body = soup.find("body")
         text = body.get_text(separator="\n", strip=True) if body else html
-        # compact whitespace
         text = re.sub(r"\n{3,}", "\n\n", text)
         if not title and text[:80]:
             title = text[:80].split("\n")[0]
@@ -100,28 +102,18 @@ class WebScrapBackend(IngestBackend):
 
 
 def _extract_urls(text: str) -> list[str]:
-    """Pull http/https URLs from text, deduplicate, filter out common noise."""
     urls = re.findall(r"https?://[^\s<>\"')\]]+", text)
-    # Clean trailing punctuation
-    cleaned = []
-    for u in urls:
-        u = u.rstrip(".,;:!?）)")
-        cleaned.append(u)
-    # Deduplicate while preserving order
-    seen = set()
-    result = []
+    cleaned = [u.rstrip(".,;:!?）)") for u in urls]
+    seen, out = set(), []
     for u in cleaned:
         if u not in seen:
-            seen.add(u)
-            result.append(u)
-    return result
+            seen.add(u); out.append(u)
+    return out
 
 
 def _html_to_markdown(html: str) -> str:
-    """Convert HTML fragment to Markdown using markdownify."""
     try:
-        from markdownify import markdownify as md
+        from markdownify import markdownify as md  # type: ignore
         return md(html, heading_style="ATX", strip=["img", "video"])
     except ImportError:
-        # last resort — strip all tags
         return re.sub(r"<[^>]+>", "", html)

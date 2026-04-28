@@ -12,6 +12,44 @@ from ..util import log
 from ..util.md import text_hash
 
 router = APIRouter()
+
+
+def _extract_post_text(parsed: dict) -> str:
+    """Pull plain text out of Lark `post` (rich text) message JSON.
+
+    Schema: {"title": "...", "content": [[<element>, ...], [<element>, ...]]}
+    Each <element> may have {"tag":"text","text":"..."} / {"tag":"a","text":"..."} /
+    {"tag":"at","user_name":"..."} / {"tag":"img"} etc.
+    We extract human-readable strings and stitch them by paragraph.
+    """
+    parts: list[str] = []
+    title = parsed.get("title", "")
+    if title:
+        parts.append(title)
+    content = parsed.get("content") or []
+    if not isinstance(content, list):
+        return "\n".join(parts)
+    for paragraph in content:
+        if not isinstance(paragraph, list):
+            continue
+        line: list[str] = []
+        for el in paragraph:
+            if not isinstance(el, dict):
+                continue
+            tag = el.get("tag", "")
+            if tag in ("text", "a", "code_inline"):
+                line.append(el.get("text", ""))
+            elif tag == "at":
+                line.append(f"@{el.get('user_name') or el.get('user_id', '')}")
+            elif tag == "img":
+                line.append("[图片]")
+            elif tag == "media":
+                line.append("[媒体]")
+            elif tag == "emotion":
+                line.append(el.get("text", ""))
+        if line:
+            parts.append("".join(line))
+    return "\n".join(p for p in parts if p)
 _logger = log.get(__name__)
 
 
@@ -67,6 +105,10 @@ def make_router(storage: Storage, queue: TaskQueue, *, encrypt_key: str, verific
             parsed = json.loads(content_raw)
             if msg_type == "text":
                 content_text = parsed.get("text", "")
+            elif msg_type == "post":
+                # v3.1: extract plain text from Lark post (rich text) by walking
+                # the content tree. Title (if any) → first line.
+                content_text = _extract_post_text(parsed)
             elif msg_type in ("file", "image", "audio"):
                 file_key = parsed.get("image_key", parsed.get("file_key", ""))
         except json.JSONDecodeError:
