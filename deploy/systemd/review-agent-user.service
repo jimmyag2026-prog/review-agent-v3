@@ -1,0 +1,16 @@
+[Unit]
+Description=review-agent v3 (user-mode)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/code/review-agent
+EnvironmentFile=%h/.config/review-agent/secrets.env
+ExecStart=%h/code/review-agent/.venv/bin/uvicorn review_agent.app:app \
+    --host 127.0.0.1 --port 8080 --workers 1 --proxy-headers
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=default.target

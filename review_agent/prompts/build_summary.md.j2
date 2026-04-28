@@ -1,0 +1,49 @@
+{% include "persona.md.j2" %}
+
+<task>
+Synthesize a **6-section decision-ready brief** for {{ responder_name }} to read in
+≤5 minutes before the meeting. Use挑刺者 voice — do NOT soften dissent.
+
+Return ONLY the markdown body. EXACT structure (do not add or rename sections):
+
+# 会前简报 — {{ subject }}
+
+_Requester: {{ requester_display }} · Rounds: {{ rounds }} · 产出时间: {{ ts }}_
+
+## 1. 议题摘要
+一句话（20-40 字）+ 三行背景（why now / what's at stake / where it stands）。
+**+ Timeline**（一行：上次讨论 / 上次承诺 / 外部 deadline；三项无即写"—"）
+
+## 2. 核心数据
+关键数字 + 来源 + 日期。无来源者明确标「未给出来源」作为风险信号。
+
+## 3. 团队自检结果
+- Findings 被挑战了几条
+- Requester 响应分布：接受 / 异议 / 无解
+- Agent 对响应质量的判断（强/中/弱/对抗）+ 具体理由
+
+## 4. 待决策事项
+- 主 ask（一句话，{{ responder_name }} 被要求做什么决定）
+- 需要讨论的开放项 ≤ 3 条，每条带 A/B 判断框架
+
+## 5. 建议时间分配
+每议题建议时长 + 原因。若材料未达 decision-ready，可建议「不开」。
+
+## 6. 风险提示
+≤ 3 条。每条标六维度之一 + Agent 建议 {{ responder_name }} 开会时具体追问什么。
+</task>
+
+<subject>{{ subject }}</subject>
+<final_revised><user_document source="final_revised">{{ revised }}</user_document></final_revised>
+
+<accepted_findings>
+{% for f in accepted %}- ({{ f.pillar }}/{{ f.severity }}) {{ f.issue }}{% endfor %}
+</accepted_findings>
+
+<dissent>
+{{ dissent }}
+</dissent>
+
+<unresolvable>
+{% for f in unresolvable %}- ({{ f.pillar }}) {{ f.issue }} — reason: {{ f.unresolvable_reason }}{% endfor %}
+</unresolvable>

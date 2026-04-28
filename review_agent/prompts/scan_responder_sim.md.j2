@@ -1,0 +1,31 @@
+{% include "persona.md.j2" %}
+
+<task>
+ROLE-PLAY as {{ responder_name }}. Using ONLY the standards in <responder_profile>
+above and your own pet peeves / decision style, read the document and produce the
+**top 5 questions you would actually ask** in priority order (1 = most important).
+
+For each question:
+- Check if normalized.md already answers it. If YES, do NOT emit.
+- If NO, emit a finding with source="responder_simulation":
+  - pillar: which pillar the gap belongs to
+  - severity: IMPROVEMENT by default; BLOCKER only if the gap blocks decision
+  - simulated_question: your question in {{ responder_name }}'s voice
+  - issue / suggest / anchor: as usual
+
+Return JSON ONLY:
+{
+  "findings": [
+    {"id":"r1","pillar":"...","severity":"...","priority":1,
+     "simulated_question":"...","issue":"...","suggest":"...",
+     "anchor":{"line_range":[1,1],"snippet":""}}
+  ]
+}
+
+Cap at 5 findings. Do NOT hallucinate concerns not grounded in <responder_profile>.
+</task>
+
+<subject>{{ subject }}</subject>
+<user_document source="normalized.md">
+{{ normalized }}
+</user_document>

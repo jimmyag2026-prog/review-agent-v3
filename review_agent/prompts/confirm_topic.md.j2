@@ -1,0 +1,26 @@
+{% include "persona.md.j2" %}
+
+<task>
+Read the normalized material and Requester's recent messages. Infer 2-4 candidate
+**single-decision topics** that {{ responder_name }} could yes/no or pick A/B about.
+
+Return JSON ONLY (no preamble, no markdown fence):
+{
+  "candidates": [
+    {"key":"a","topic":"<≤30 char single-decision topic>"},
+    {"key":"b","topic":"..."},
+    {"key":"c","topic":"..."}
+  ],
+  "im_message": "<≤280 char DM text in Requester's language. End with the option block: (a) ... (b) ... (c) ... (pass) 跳过 (custom) 其他>"
+}
+</task>
+
+<user_document source="normalized.md">
+{{ normalized }}
+</user_document>
+
+{% if recent_messages %}
+<user_document source="recent_messages">
+{{ recent_messages }}
+</user_document>
+{% endif %}

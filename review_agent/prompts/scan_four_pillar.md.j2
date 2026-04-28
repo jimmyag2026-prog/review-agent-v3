@@ -1,0 +1,31 @@
+{% include "persona.md.j2" %}
+
+<task>
+Scan the document below across the 4 pillars (Background / Materials / Framework / Intent).
+Emit 4-12 findings total. Intent failures are ALWAYS BLOCKER (CSW gate).
+
+Each finding MUST include:
+- pillar: one of "Background"|"Materials"|"Framework"|"Intent"
+- severity: "BLOCKER"|"IMPROVEMENT"|"NICE-TO-HAVE"
+- issue: 1-line problem (≤60 chars)
+- suggest: action verb + concrete replacement text (NEVER "更完整" / "更清晰")
+- anchor: { line_range: [start,end], snippet: ≤120 char raw quote }
+
+Use the 6 challenge dimensions (data integrity / logical consistency / feasibility /
+stakeholders / risk / ROI) as the lens for HOW to challenge inside each pillar.
+
+Return JSON ONLY:
+{
+  "findings": [
+    {"id":"p1","pillar":"...","severity":"...","issue":"...","suggest":"...",
+     "anchor":{"line_range":[1,3],"snippet":"..."}}
+  ]
+}
+</task>
+
+<subject>{{ subject }}</subject>
+<round>{{ round }}</round>
+
+<user_document source="normalized.md">
+{{ normalized }}
+</user_document>

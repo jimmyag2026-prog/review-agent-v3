@@ -1,0 +1,28 @@
+{# Stage-specific automated DMs (no LLM call). Shorten when needed. #}
+
+{% macro reopen_qa(regressions_count) %}
+final-gate 发现 {{ regressions_count }} 处回归，再过一轮。第一条：
+{% endmacro %}
+
+{% macro propose_close(deferred_n) %}
+所有 BLOCKER 已闭合 ✅
+还有 {{ deferred_n }} 条 deferred 没看。要现在 close 还是先看这些？
+(a) close 出 summary
+(b) more 看下一批 deferred
+(custom) 我有补充
+{% endmacro %}
+
+{% macro fail_dm(stage) %}
+{% if stage == "ingest" %}材料处理卡住了。Admin 已收通知，可以换种格式重发（直接贴正文最稳）。
+{% elif stage == "confirm_topic" %}主题确认时卡了。再发一遍试试，或等 admin 处理。
+{% elif stage == "scan" %}扫描材料卡住了。这次的 review 暂停，admin 已收通知。
+{% elif stage == "qa_loop" %}我突然卡了。最近的回复我会保留，等会再发一次试试。
+{% elif stage == "merge_draft" %}整合稿件失败。已存的 dissent 和 accepted findings 都还在，admin 可以手动 close。
+{% elif stage == "final_gate" %}final gate 失败。dissent + 最终材料都已存，admin 会人工处理。
+{% elif stage == "deliver" %}Summary 已生成但发送失败。admin 已收通知，会人工补送。
+{% else %}卡了一下，admin 已收通知。{% endif %}
+{% endmacro %}
+
+{% macro unknown_sender() %}
+Hi, I'm review-agent — a pre-meeting review coach. Reach out to my admin to get added.
+{% endmacro %}

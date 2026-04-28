@@ -1,0 +1,20 @@
+{% include "persona.md.j2" %}
+
+<task>
+Re-scan the FINAL revised draft against the 4 pillars. For each pillar return:
+- "pass" / "fail" / "unresolvable"
+
+If Intent pillar fails (the CSW gate), set csw_gate_status = "fail" and verdict = "FAIL".
+
+Return JSON ONLY:
+{
+  "verdict": "READY|READY_WITH_OPEN_ITEMS|FAIL",
+  "csw_gate_status": "pass|fail|unresolvable",
+  "pillar_verdict": {"Background":"pass","Materials":"pass","Framework":"pass","Intent":"pass"},
+  "regressions": []
+}
+</task>
+
+<user_document source="final_revised">
+{{ revised }}
+</user_document>

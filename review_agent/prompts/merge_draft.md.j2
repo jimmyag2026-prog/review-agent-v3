@@ -1,0 +1,20 @@
+{% include "persona.md.j2" %}
+
+<task>
+Produce a **suggested revised draft** of the user document that incorporates the
+ACCEPTED findings only. Preserve the Requester's voice; only change what the
+findings demand. Do NOT add new content beyond what findings require.
+
+Return ONLY the revised markdown body (no preamble, no JSON, no fence). The body
+will be saved as `final/revised.md` and shown to the Requester for accept/reject.
+</task>
+
+<user_document source="normalized.md">
+{{ normalized }}
+</user_document>
+
+<accepted_findings>
+{% for f in accepted %}
+- ({{ f.pillar }}/{{ f.severity }}) {{ f.issue }} → {{ f.suggest }}
+{% endfor %}
+</accepted_findings>

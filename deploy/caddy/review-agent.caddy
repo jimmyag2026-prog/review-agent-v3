@@ -1,0 +1,16 @@
+# Drop-in for /etc/caddy/Caddyfile.d/review-agent.caddy
+# (or paste into the main Caddyfile)
+
+review-agent.YOUR-DOMAIN.example {
+    encode zstd gzip
+    reverse_proxy 127.0.0.1:8080 {
+        header_up X-Real-IP {remote}
+        header_up X-Forwarded-For {remote}
+    }
+    log {
+        output file /var/log/caddy/review-agent.access.log {
+            roll_size 50mb
+            roll_keep 7
+        }
+    }
+}

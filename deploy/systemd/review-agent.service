@@ -1,0 +1,37 @@
+[Unit]
+Description=review-agent v3 (FastAPI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=review-agent
+Group=review-agent
+WorkingDirectory=/opt/review-agent
+EnvironmentFile=/etc/review-agent/secrets.env
+Environment="REVIEW_AGENT_CONFIG=/etc/review-agent/config.toml"
+ExecStart=/opt/review-agent/.venv/bin/uvicorn review_agent.app:app \
+    --host 127.0.0.1 --port 8080 --workers 1 --proxy-headers
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=65536
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/review-agent /var/log/review-agent
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallFilter=@system-service
+
+StandardOutput=append:/var/log/review-agent/app.log
+StandardError=append:/var/log/review-agent/app.log
+
+[Install]
+WantedBy=multi-user.target
