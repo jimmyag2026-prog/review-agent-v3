@@ -87,7 +87,18 @@ def handle_reply(
 
     cur_id = cursor.current_id
     if cur_id is None:
-        return TurnOutcome("no_op")
+        # Cursor exhausted but session still in qa_active — happens after
+        # regression_rescan consumes its last item without transitioning to
+        # AWAITING_CLOSE_CONFIRMATION. Surface state instead of swallowing.
+        deferred_n = len(cursor.deferred)
+        if deferred_n > 0:
+            dm = (
+                f"BLOCKER 都闭合了 ✅ 还有 {deferred_n} 条 deferred。\n"
+                "回 `a` close 出 summary，或 `more` 看 deferred。"
+            )
+        else:
+            dm = "BLOCKER 都闭合了 ✅\n回 `a` close 出 summary。"
+        return TurnOutcome("propose_close", dm_text=dm)
 
     findings = storage.load_findings(session)
     cur_finding = next((f for f in findings if f["id"] == cur_id), None)
