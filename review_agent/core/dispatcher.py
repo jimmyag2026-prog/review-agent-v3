@@ -374,6 +374,56 @@ class Dispatcher:
         await self._safe_dm(user.open_id, polite)
         return False
 
+    async def _maybe_reingest_at_subject_confirmation(
+        self, user: User, session: Session, msg: IncomingMessage,
+    ) -> bool:
+        """Issue #9: at SUBJECT_CONFIRMATION, if Requester sends new material
+        (URL or long text) treat it as material substitution: overwrite
+        normalized.md and re-run confirm_topic to propose fresh candidates.
+        Returns True if we re-ingested (caller should stop), False if the reply
+        is a normal a/b/c/short-custom-subject answer.
+        """
+        text = msg.content_text
+        lark_urls = extract_lark_urls(text)
+        web_urls = _extract_urls_simple(text)
+        is_long = len(text.strip()) > 300  # Heuristic: long enough to be material
+
+        if not (lark_urls or web_urls or is_long):
+            return False
+
+        normalized_path = resolve_session_path(
+            self.cfg.paths.fs, user.open_id, session.id, "normalized.md",
+        )
+        if lark_urls:
+            ld = LarkDocIngestBackend(self.lark)
+            result = await ld.fetch_lark_urls(lark_urls)
+            atomic_write(normalized_path, result.normalized)
+            await self._safe_dm(
+                user.open_id,
+                f"📄 已读取你发的 Lark 文档（{len(lark_urls)} 个），重新分析主题…",
+            )
+        elif web_urls:
+            ws = WebScrapBackend()
+            result = await ws.scrape_urls(web_urls)
+            atomic_write(normalized_path, result.normalized)
+            await self._safe_dm(
+                user.open_id,
+                f"🌐 已抓取 {len(web_urls)} 个网页，重新分析主题…",
+            )
+        else:
+            # long plain text — treat as new material directly
+            atomic_write(normalized_path, text)
+            await self._safe_dm(
+                user.open_id, "📝 收到新材料，重新分析主题…",
+            )
+
+        # reset session.subject + stage so confirm_topic re-asks cleanly
+        self.storage.update_session(
+            session.id, subject=None, stage=Stage.SUBJECT_CONFIRMATION,
+        )
+        await self._do_confirm_topic(session.id)
+        return True
+
     @staticmethod
     def _guess_ext_from_content_raw(content_raw: str) -> str:
         import json
@@ -391,6 +441,13 @@ class Dispatcher:
         self, user: User, session: Session, msg: IncomingMessage
     ) -> None:
         if session.stage == Stage.SUBJECT_CONFIRMATION:
+            # Issue #9: if Tester replies with new material (URL or long text)
+            # instead of a/b/c/custom-short-subject, re-ingest from that material
+            # rather than letting confirm_topic.handle_reply jam it into subject.
+            if msg.msg_type in ("text", "post") and msg.content_text.strip():
+                if await self._maybe_reingest_at_subject_confirmation(user, session, msg):
+                    return
+
             intent, chosen = confirm_topic.handle_reply(
                 storage=self.storage, session=session, reply=msg.content_text,
             )
