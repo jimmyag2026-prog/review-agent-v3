@@ -26,16 +26,22 @@ def make_router(storage: Storage, queue: TaskQueue, *, encrypt_key: str, verific
         except json.JSONDecodeError:
             raise HTTPException(400, "invalid json")
 
-        # url_verification (initial setup)
+        # 1) signature verify FIRST (raw body bytes; required when encrypt_key is set —
+        #    Lark wraps even url_verification in the encrypted envelope, so this must
+        #    happen before we can read obj["type"])
+        if encrypt_key and request.headers.get("X-Lark-Signature"):
+            if not wh.verify_v2_signature(request.headers, raw_body, encrypt_key):
+                raise HTTPException(401, "bad signature")
+
+        # 2) decrypt envelope if present
+        if "encrypt" in obj:
+            if not encrypt_key:
+                raise HTTPException(401, "encrypted event but no encrypt_key configured")
+            obj = wh.decrypt_aes(obj["encrypt"], encrypt_key)
+
+        # 3) url_verification AFTER decrypt — works for both encrypted and plain modes
         if obj.get("type") == "url_verification":
             return {"challenge": obj.get("challenge", "")}
-
-        # signature verify (round-1 B4)
-        if encrypt_key and not wh.verify_v2_signature(request.headers, raw_body, encrypt_key):
-            raise HTTPException(401, "bad signature")
-
-        if "encrypt" in obj:
-            obj = wh.decrypt_aes(obj["encrypt"], encrypt_key)
 
         if obj.get("token") and verification_token and obj["token"] != verification_token:
             raise HTTPException(401, "bad token")
