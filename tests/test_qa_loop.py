@@ -87,6 +87,34 @@ def test_force_close(session_setup):
     assert o.action == "force_close"
 
 
+def test_cursor_exhausted_with_deferred_proposes_close(session_setup):
+    """Regression: after regression_rescan finishes its last item, cursor ends
+    up current_id=None / pending=[] but session.stage stays qa_active. Any
+    subsequent reply previously returned no_op and the dispatcher silently
+    swallowed it. Now it must propose_close so the user gets a DM and a way
+    out (a / more / done)."""
+    storage, s, *_ = session_setup
+    storage.save_cursor(s, Cursor(
+        current_id=None, pending=[],
+        deferred=["d1", "d2", "d3"],
+    ))
+    o = qa_loop.handle_reply(storage=storage, session=s, reply="hello", top_n_more=5)
+    assert o.action == "propose_close"
+    assert "deferred" in o.dm_text
+    assert "3" in o.dm_text
+
+
+def test_cursor_exhausted_no_deferred_proposes_close(session_setup):
+    """Same exhausted-cursor case but with no deferred items either: still
+    propose_close (without the deferred mention) so the user can reply `a`
+    to close out."""
+    storage, s, *_ = session_setup
+    storage.save_cursor(s, Cursor(current_id=None, pending=[], deferred=[]))
+    o = qa_loop.handle_reply(storage=storage, session=s, reply="结果出来了嘛", top_n_more=5)
+    assert o.action == "propose_close"
+    assert "deferred" not in o.dm_text
+
+
 def test_regression_reopen(session_setup):
     storage, s, *_ = session_setup
     _seed_findings(storage, s, [("p1", Pillar.INTENT, Severity.BLOCKER)])
