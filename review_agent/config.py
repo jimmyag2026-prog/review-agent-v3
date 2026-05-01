@@ -80,6 +80,12 @@ class ReviewCfg:
 
 
 @dataclass
+class SlackCfg:
+    bot_token: str = ""
+    app_token: str = ""
+    bot_user_id: str = ""
+
+@dataclass
 class DashboardCfg:
     enabled: bool = True
     host: str = "127.0.0.1"
@@ -93,6 +99,7 @@ class Config:
     lark: LarkCfg = field(default_factory=LarkCfg)
     llm: LlmCfg = field(default_factory=LlmCfg)
     review: ReviewCfg = field(default_factory=ReviewCfg)
+    slack: SlackCfg = field(default_factory=SlackCfg)
     dashboard: DashboardCfg = field(default_factory=DashboardCfg)
 
 
@@ -107,7 +114,8 @@ def load(path: str | None = None) -> Config:
 def _merge(cfg: Config, raw: dict) -> Config:
     sections = {
         "server": cfg.server, "paths": cfg.paths, "lark": cfg.lark,
-        "llm": cfg.llm, "review": cfg.review, "dashboard": cfg.dashboard,
+        "llm": cfg.llm, "review": cfg.review, "slack": cfg.slack,
+        "dashboard": cfg.dashboard,
     }
     for sect, obj in sections.items():
         if sect in raw and isinstance(raw[sect], dict):
@@ -144,4 +152,10 @@ def _from_env(cfg: Config) -> Config:
         cfg.review.top_n_findings = int(v)
     if v := os.environ.get("REVIEW_AGENT_AUTO_REGISTER"):
         cfg.review.auto_register_requesters = v.lower() not in ("0", "false", "no", "off")
+    if v := os.environ.get("REVIEW_AGENT_SLACK_BOT_TOKEN"):
+        cfg.slack.bot_token = v
+    if v := os.environ.get("REVIEW_AGENT_SLACK_APP_TOKEN"):
+        cfg.slack.app_token = v
+    if v := os.environ.get("REVIEW_AGENT_SLACK_BOT_USER_ID"):
+        cfg.slack.bot_user_id = v
     return cfg

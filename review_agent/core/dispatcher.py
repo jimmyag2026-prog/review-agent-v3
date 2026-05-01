@@ -29,6 +29,7 @@ from ..pipeline.delivery_backends import (
     LarkDmBackend,
     LarkDocBackend,
     LocalArchiveBackend,
+    SlackDmBackend,
 )
 from ..pipeline.ingest import IngestPipeline
 from ..pipeline.ingest_backends import (
@@ -61,17 +62,21 @@ class Dispatcher:
         llm: LLMClient,
         lark: LarkClient,
         ingest_backends: list[IngestBackend],
+        slack_adapter=None,  # optional SlackAdapter
     ):
         self.cfg = cfg
         self.storage = storage
         self.llm = llm
         self.lark = lark
+        self.slack = slack_adapter
         self.ingest = IngestPipeline(cfg.paths.fs, ingest_backends)
         self.delivery_backends: dict[str, DeliveryBackend] = {
             "lark_dm": LarkDmBackend(lark),
             "lark_doc": LarkDocBackend(lark),
             "local_path": LocalArchiveBackend(),
         }
+        if slack_adapter is not None:
+            self.delivery_backends["slack_dm"] = SlackDmBackend(slack_adapter)
 
     # ── entry point: a task envelope dequeued by worker ──
     async def dispatch(self, task: dict) -> None:
