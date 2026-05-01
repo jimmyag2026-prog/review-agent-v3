@@ -20,6 +20,11 @@ class TenantTokenCache:
         self._token: str | None = None
         self._expires_at: float = 0.0
 
+    def invalidate(self) -> None:
+        """Force the next get() to fetch a fresh token."""
+        self._token = None
+        self._expires_at = 0.0
+
     async def get(self) -> str:
         # refresh 10 min before actual expiry
         if self._token and time.time() < self._expires_at - 600:
