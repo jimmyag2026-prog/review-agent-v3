@@ -47,6 +47,8 @@ class LarkClient:
         self._http = http or httpx.AsyncClient(timeout=30.0)
         self._owned = http is None
         self._token = TenantTokenCache(app_id, app_secret, self.base_url, self._http)
+        self._user_cache: dict[str, tuple[dict[str, Any], float]] = {}  # id → (user, expire_at)
+        self._user_cache_ttl: float = 600.0  # ten minutes
 
     async def aclose(self) -> None:
         if self._owned:
@@ -140,11 +142,25 @@ class LarkClient:
         return out.get("data", {}).get("message_id", "")
 
     async def get_user(self, open_id: str) -> dict[str, Any]:
+        """Fetch a Lark user by open_id, with 10-minute cache.
+
+        Cache is keyed on open_id. Expired entries are automatically
+        re-fetched. API errors are NOT cached — they bubble up immediately.
+        """
+        now = time.time()
+        cached = self._user_cache.get(open_id)
+        if cached is not None:
+            user, expire_at = cached
+            if now < expire_at:
+                return user
+
         out = await self._get(
             f"/open-apis/contact/v3/users/{open_id}",
             params={"user_id_type": "open_id"},
         )
-        return out.get("data", {}).get("user", {})
+        user = out.get("data", {}).get("user", {})
+        self._user_cache[open_id] = (user, now + self._user_cache_ttl)
+        return user
 
     async def download_file(self, message_id: str, file_key: str, *, kind: str = "file") -> bytes:
         token = await self._token.get()
