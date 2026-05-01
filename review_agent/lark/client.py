@@ -141,6 +141,35 @@ class LarkClient:
         out = await self._post("/open-apis/im/v1/messages?receive_id_type=open_id", body)
         return out.get("data", {}).get("message_id", "")
 
+    async def update_message(
+        self, message_id: str, text: str, *, msg_type: str = "text",
+    ) -> bool:
+        """Update/overwrite a previously sent Lark message.
+
+        Calls Lark im/v1/messages/{message_id} (PUT) to replace the content
+        of an existing message in-place.  Useful for editing progress updates
+        or replacing placeholder text.
+
+        msg_type: ``"text"`` (default) or ``"post"``.
+        Returns True on success, False on Lark API error.
+        """
+        content: str
+        if msg_type == "post":
+            # post content is already pre-built (json string of zh_cn format)
+            content = text
+        else:
+            content = json.dumps({"text": text}, ensure_ascii=False)
+
+        body = {"msg_type": msg_type, "content": content}
+        try:
+            out = await self._request_with_retry(
+                "PUT", f"/open-apis/im/v1/messages/{message_id}", json=body,
+            )
+            code = out.get("code", -1)
+            return code == 0
+        except httpx.HTTPStatusError:
+            return False
+
     async def get_user(self, open_id: str) -> dict[str, Any]:
         """Fetch a Lark user by open_id, with 10-minute cache.
 
