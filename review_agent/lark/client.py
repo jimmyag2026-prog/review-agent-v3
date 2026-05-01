@@ -217,8 +217,13 @@ class LarkClient:
         return content_data if isinstance(content_data, str) else str(content_data)
 
     async def get_wiki_node(self, wiki_token: str, *,
-                            obj_type: str = "docx") -> dict:
+                            obj_type: str = "wiki") -> dict:
         """Get wiki node metadata (title, document_id, obj_type).
+
+        Note: obj_type describes the URL token, not what's stored. For a wiki
+        URL like /wiki/<token>, the token IS a wiki node ⇒ obj_type="wiki".
+        Passing "docx" returns 400 not_found even when the underlying object
+        is a docx (verified empirically against open.larksuite.com).
 
         https://open.feishu.cn/document/server-docs/docs/wiki-v2/space-node/get_node
         """

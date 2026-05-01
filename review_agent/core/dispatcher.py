@@ -285,7 +285,13 @@ class Dispatcher:
             return
 
         # otherwise: treat as supplementary material
-        added = await self._append_supplementary_material(user, session, msg)
+        try:
+            added = await self._append_supplementary_material(user, session, msg)
+        except IngestRejected as e:
+            # friendly DM about why the material was rejected; stay in gate so
+            # the user can supply something else (or `ok` / `cancel`).
+            await self._safe_dm(user.open_id, e.user_message)
+            return
         if not added:
             await self._safe_dm(
                 user.open_id,
@@ -328,27 +334,23 @@ class Dispatcher:
                     f"input/{iso}_supplement{ext}",
                 )
                 p.write_bytes(raw)
-                # ingest this single file → its normalized text appended to main
-                from ..pipeline.ingest_backends.base import IngestRejected as _IR
-                try:
-                    result = await self.ingest.run(session, p.name)
-                    appended_text = ""
-                    # ingest.run wrote to normalized.md; we want to APPEND not REPLACE
-                    # so re-read what it wrote and merge instead.
-                    norm = resolve_session_path(
-                        self.cfg.paths.fs, user.open_id, session.id, "normalized.md",
-                    )
-                    appended_text = norm.read_text(encoding="utf-8") if norm.exists() else ""
-                    # ingest.run will have OVERWRITTEN normalized; merge with prior
-                    return self._do_append_to_normalized(session, appended_text, replace=False)
-                except _IR as e:
-                    await self._safe_dm(user.open_id, e.user_message)
-                    return False
+                # ingest this single file → its normalized text appended to main.
+                # IngestRejected is intentionally NOT caught here — it carries a
+                # user_message that the call sites surface as a friendly DM.
+                await self.ingest.run(session, p.name)
+                norm = resolve_session_path(
+                    self.cfg.paths.fs, user.open_id, session.id, "normalized.md",
+                )
+                appended_text = norm.read_text(encoding="utf-8") if norm.exists() else ""
+                # ingest.run will have OVERWRITTEN normalized; merge with prior
+                return self._do_append_to_normalized(session, appended_text, replace=False)
+            except IngestRejected:
+                raise
             except Exception as e:
                 _logger.warning("supplement attachment failed: %s", e)
                 return False
 
-        # text-like
+        # text-like — IngestRejected from URL fetches propagates to call sites
         lark_urls = extract_lark_urls(text)
         web_urls = _extract_urls_simple(text)
         if lark_urls:
@@ -696,7 +698,11 @@ class Dispatcher:
         """
         # attachments are unambiguously material
         if msg.msg_type in ("image", "file", "audio") and msg.file_key:
-            added = await self._append_supplementary_material(user, session, msg)
+            try:
+                added = await self._append_supplementary_material(user, session, msg)
+            except IngestRejected as e:
+                await self._safe_dm(user.open_id, e.user_message)
+                return True  # we handled it (with a friendly error DM)
             if added:
                 await self._kickoff_rescan_after_supplement(user, session)
             return added
@@ -713,7 +719,14 @@ class Dispatcher:
             # short text reply — let qa_loop interpret as a/b/c/custom
             return False
 
-        added = await self._append_supplementary_material(user, session, msg)
+        try:
+            added = await self._append_supplementary_material(user, session, msg)
+        except IngestRejected as e:
+            # URL or attachment we couldn't read → tell the user why and stay
+            # in qa_active. Returning True so the qa_loop doesn't also try to
+            # parse the URL as an a/b/c reply.
+            await self._safe_dm(user.open_id, e.user_message)
+            return True
         if added:
             await self._kickoff_rescan_after_supplement(user, session)
         return added

@@ -1,5 +1,41 @@
 # Changelog
 
+## [3.3.0] — 2026-05-01 (Lark hardening + Slack + carried-over hotfixes)
+
+### New
+
+- **Slack Socket Mode integration** (`a3d1d27`). Optional second IM platform,
+  gated by `SLACK_BOT_TOKEN` + `SLACK_APP_TOKEN`. Adds `slack_dm` delivery
+  backend and `review_agent/slack/` adapter (mrkdwn renderer, thread
+  participation tracking).
+- **Lark FeishuAdapter Tier 1+2** (PR #5):
+  - HTTP retry on 429 / 5xx with exponential backoff + `Retry-After` honoring.
+  - Token-expired (code 99991663) auto-invalidates and retries.
+  - Inbound post rich-text parser (`review_agent/lark/parser.py`).
+  - 10-minute cache for `get_user`.
+  - Per-session async lock in worker dispatch (keyed on `requester_oid`).
+  - `update_message` to overwrite a previously-sent Lark DM in place.
+- **`REVIEW_AGENT_LARK_DOMAIN` env var** for switching between
+  `open.larksuite.com` (international) and `open.feishu.cn` (China). Token +
+  open-API base must match the cloud where the bot is registered.
+
+### Fixed
+
+- **`qa_loop` cursor exhausted no_op** (PR #4 / #3 / `a858945`). When the
+  cursor is exhausted but the session is still in `qa_active` (after a
+  `regression_rescan` consumes its last item), the worker now sends a
+  `propose_close` DM instead of swallowing the turn into a silent no_op.
+- **`get_wiki_node` default `obj_type`** now `"wiki"` instead of `"docx"`.
+  Lark's `/wiki/v2/spaces/get_node` resolves the URL token, not the underlying
+  storage type — passing `"docx"` returns 400 not_found even when the wiki
+  page IS a docx (verified empirically against `open.larksuite.com`).
+- **`IngestRejected` propagation in supplementary material flow.** The
+  exception now bubbles from `_append_supplementary_material` to its three
+  call sites (`_handle_subject_confirmation`, qa-active reply attachment path,
+  qa-active reply text/URL path), each of which DMs the user with
+  `e.user_message` and stays in the gate. Previously a rejection on the
+  attachment-only path could crash the worker task.
+
 ## [3.1.1] — 2026-04-28 (Gemini multimodal fallback)
 
 Adds Google Gemini as a third multimodal fallback alongside local

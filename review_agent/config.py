@@ -138,6 +138,10 @@ def _from_env(cfg: Config) -> Config:
         cfg.paths.log = v
     if v := os.environ.get("REVIEW_AGENT_LARK_APP_ID"):
         cfg.lark.app_id = v
+    # Lark international (open.larksuite.com) vs Feishu China (open.feishu.cn).
+    # Token + open-API base must match the cloud where the bot is registered.
+    if v := os.environ.get("REVIEW_AGENT_LARK_DOMAIN"):
+        cfg.lark.domain = v.rstrip("/")
     if v := os.environ.get("REVIEW_AGENT_MODEL"):
         cfg.llm.default_model = v
     if v := os.environ.get("REVIEW_AGENT_FAST_MODEL"):
