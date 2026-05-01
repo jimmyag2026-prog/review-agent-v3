@@ -29,13 +29,13 @@ def _make_client_with_mock_post(monkeypatch) -> tuple[LarkClient, MagicMock]:
 
     captured: dict = {}
 
-    async def fake_post(url, headers=None, json=None):
+    async def fake_request(method, url, headers=None, json=None, params=None):
         captured["url"] = url
         captured["headers"] = headers
         captured["json"] = json
         return response
 
-    monkeypatch.setattr(client._http, "post", fake_post)
+    monkeypatch.setattr(client._http, "request", fake_request)
     return client, captured  # type: ignore[return-value]
 
 

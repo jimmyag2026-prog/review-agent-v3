@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import random
+import time
 from typing import Any
 
 import httpx
@@ -9,6 +12,26 @@ from ..util import log
 from .token import TenantTokenCache
 
 _logger = log.get(__name__)
+
+# ── Retry helpers ───────────────────────────────────────────────
+
+_MAX_ATTEMPTS = 4          # 1 initial + 3 retries = 4 total
+_TOKEN_EXPIRED = 99991663  # Lark app-level token-expired code
+
+
+def _backoff_429(attempt: int, retry_after: str | None) -> float:
+    """Return sleep seconds for a 429 rate-limit retry."""
+    if retry_after is not None:
+        try:
+            return float(retry_after)
+        except (TypeError, ValueError):
+            pass
+    return (2 ** attempt) + random.uniform(0, 0.5)
+
+
+def _backoff_5xx(attempt: int) -> float:
+    """Return sleep seconds for a 5xx server-error retry."""
+    return (2 ** attempt) * 0.5 + random.uniform(0, 0.5)
 
 
 class LarkClient:
@@ -30,24 +53,61 @@ class LarkClient:
             await self._http.aclose()
 
     async def _post(self, path: str, payload: dict) -> dict:
-        token = await self._token.get()
-        r = await self._http.post(
-            f"{self.base_url}{path}",
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            json=payload,
-        )
-        r.raise_for_status()
-        return r.json()
+        return await self._request_with_retry("POST", path, json=payload)
 
     async def _get(self, path: str, params: dict | None = None) -> dict:
-        token = await self._token.get()
-        r = await self._http.get(
-            f"{self.base_url}{path}",
-            headers={"Authorization": f"Bearer {token}"},
-            params=params,
-        )
-        r.raise_for_status()
-        return r.json()
+        return await self._request_with_retry("GET", path, params=params)
+
+    # ── Retry loop (internal) ──────────────────────────────────
+
+    async def _request_with_retry(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: dict | None = None,
+        params: dict | None = None,
+    ) -> dict:
+        url = f"{self.base_url}{path}"
+        for attempt in range(_MAX_ATTEMPTS):
+            token = await self._token.get()
+            headers = {"Authorization": f"Bearer {token}"}
+            if json is not None:
+                headers["Content-Type"] = "application/json"
+
+            r = await self._http.request(
+                method, url, headers=headers, json=json, params=params,
+            )
+            body = r.json()
+
+            # ── Token expired: invalidate cache, retry ─
+            if r.status_code == 200 and body.get("code") == _TOKEN_EXPIRED:
+                self._token.invalidate()
+                continue
+
+            # ── 2xx (non-token-expired): done ─
+            if r.is_success:
+                return body
+
+            # ── Non-retryable 4xx: raise immediately ─
+            if r.status_code != 429 and 400 <= r.status_code < 500:
+                r.raise_for_status()
+
+            # ── 429 / 5xx — retry with backoff ─
+            if attempt == _MAX_ATTEMPTS - 1:  # last attempt
+                r.raise_for_status()
+
+            if r.status_code == 429:
+                delay = _backoff_429(attempt, r.headers.get("Retry-After"))
+            else:  # 5xx
+                delay = _backoff_5xx(attempt)
+
+            _logger.debug("retry %d/%d for %s %s — sleeping %.2fs",
+                          attempt + 1, _MAX_ATTEMPTS - 1, method, path, delay)
+            await asyncio.sleep(delay)
+
+        # Should never reach here; last iteration raises above
+        raise RuntimeError(f"unreachable: {method} {path}")
 
     async def send_dm_text(self, open_id: str, text: str) -> str:
         body = {
